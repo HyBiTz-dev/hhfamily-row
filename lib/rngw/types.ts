@@ -2,8 +2,11 @@
  * Domain types for the guild tool.
  *
  * Job/class data is static game facts (ids + names) and lives in `jobs.ts`.
- * Everything below is data *we* own and persists to Google Sheets.
+ * Everything below is data *we* own and persist to Turso.
  */
+
+/** The boards a party can play on. */
+export type EventCategoryId = "guild-war" | "guild-league" | "polarity";
 
 /** Whether a member is playing today. */
 export type AttendanceStatus = "present" | "leave" | "unknown";
@@ -17,7 +20,7 @@ export function isAttendanceStatus(value: unknown): value is AttendanceStatus {
 export interface Member {
   /**
    * In-game character name. Used as the primary key — character names are
-   * unique within a guild, so it doubles as the sheet's row identifier.
+   * unique within a guild, so it doubles as the primary key.
    */
   name: string;
   /**
@@ -52,23 +55,60 @@ export interface AttendanceRow {
 }
 
 /**
- * A party, stored as one row in the sheet's `parties` tab. Only the guild
- * master edits these, straight on the sheet — there is no browser-side copy.
+ * One box/team-large on a board.
+ *
+ * Rows are named by the guild master, for every event. League rows used to be
+ * fixed game lanes; they are now the same first-class containers as Guild War
+ * boxes, which is why a row can stay empty and be renamed or reordered.
+ */
+export interface EventRow {
+  id: string;
+  event: EventCategoryId;
+  /** `''` for events without league tabs. */
+  division: string;
+  name: string;
+  position: number;
+}
+
+/**
+ * Where one party sits on one event's board.
+ *
+ * A party has one placement per event it plays, so its event set is the set of
+ * these rows. The roster is not here: it lives on the party, which is why
+ * editing a member on Guild War also changes the same party on Guild League.
+ */
+export interface PartyPlacement {
+  event: EventCategoryId;
+  /** `''` for events without league tabs. */
+  division: string;
+  /** `EventRow.id`, or `null` for the virtual "ว่าง" row. */
+  rowId: string | null;
+  position: number;
+}
+
+/**
+ * A party/team.
+ *
+ * `placements` is the source of truth for which boards the team appears on.
+ * `content` is a display label derived from those placements and the row names
+ * — never written by the editor, never matched against.
  */
 export interface Party {
   id: string;
   name: string;
-  /** What the party is for, e.g. a dungeon or boss. */
+  /** Derived display label, e.g. "Guild War ทีมสเกา". Read-only. */
   content?: string;
+  /** One entry per event this team plays. */
+  placements: PartyPlacement[];
   /** Member names, in slot order. */
   memberNames: string[];
   /**
    * Kept out of "delete every party" and out of the trash button.
    *
    * Only deletion — editing still works on a locked party, because "don't wipe
-   * the sheet" and "hands off this team" are different requests and locking
+   * the list" and "hands off this team" are different requests and locking
    * that also freezes the name would only make the flag surprising. Unlocked
-   * parties fall back to `undefined` so the sheet column stays blank.
+   * parties fall back to `undefined` so the column stays blank.
    */
   locked?: boolean;
   updatedAt: string;

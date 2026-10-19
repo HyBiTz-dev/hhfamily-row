@@ -36,11 +36,42 @@ token คือความลับของเซิร์ฟเวอร์�
 
 | ตาราง | เก็บอะไร |
 | --- | --- |
-| `members` | รายชื่อ · **คลาส (ชื่อ เช่น `Paladin`)** · level · note · active · position |
+| `members` | รายชื่อ · **คลาส (ชื่อ เช่น `Paladin`)** · level · note · position |
 | `attendance` | บันทึกการส่งสถานะ **append-only** มี `seq` เป็นลำดับการส่ง |
-| `parties` | ปาร์ตี้ · ป้ายกำกับ · รายชื่อสมาชิก (JSON) · locked · position |
+| `parties` | หัวทีม · ชื่อ · `locked` · `position` (ลำดับการ์ดในแท็บปาร์ตี้) |
+| `party_members` | สมาชิกในทีม · `slot` = ลำดับคนในทีม · PK `(party_id, member_name)` |
+| `event_rows` | กล่องของทุกอีเวนต์ (`event` + `division` + `name` + `position`) |
+| `party_placements` | ทีมลงอีเวนต์ไหน อยู่กล่องไหน (`row_id`) และลำดับการ์ดต่อ scope (`position`) |
+| `app_meta` | key/value เล็ก ๆ — ตอนนี้เก็บ `parties_version` สำหรับ optimistic lock |
 
-`position` คือลำดับที่เดิมชีตเก็บไว้เป็นลำดับแถว — พ่อสลับลำดับปาร์ตี้ด้วยการเขียนใหม่ทั้งลิสต์ ถ้าไม่เก็บไว้ ลำดับจะหายทุกครั้งที่อ่าน
+**ที่มาของป้ายทีม:** `parties.content` กับ `parties.members` เป็นคอลัมน์รุ่นเก่า
+ที่ยังอยู่ในสคีมาแต่ **ไม่ถูกอ่านและไม่ถูกเขียนแล้ว** (`saveParties` เขียน `NULL` / `'[]'`
+ทุกครั้ง) ป้ายที่เห็นบนจอ derive จาก `party_placements` + ชื่อใน `event_rows`
+ด้วย `derivePartyContent()` และรายชื่อมาจาก `party_members` เท่านั้น
+
+**ลำดับ 4 ตัวใช้คนละเรื่อง:** `parties.position` = ลำดับการ์ดในแท็บปาร์ตี้ ·
+`party_placements.position` = ลำดับการ์ดต่อ scope (`event` + `division`) ·
+`event_rows.position` = ลำดับกล่องต่อ scope · `party_members.slot` = ลำดับคนในทีม
+
+## ตรวจว่าข้อมูลย้ายมารุ่น normalized แล้ว
+
+migration แบบ one-time ถูกลบออกจากโค้ดแล้ว (เฟส 1) แต่ marker ยังอยู่ใน `app_meta`
+ใช้ตรวจย้อนหลังได้ด้วยสคริปต์อ่านอย่างเดียว:
+
+```bash
+node scripts/turso-inspect.mjs
+```
+
+ต้องเห็น `parties_normalized_v1` และ `parties_normalized_v1_report` ครบ
+และจำนวน `parties` / `party_placements` / `party_members` / `event_rows` ไม่เป็นศูนย์
+ถ้ามีทีมที่ยังไม่มีกล่อง (placement `row_id IS NULL`) สคริปต์จะแสดงให้เห็น —
+แก้ได้จากหน้าเวิร์กบอร์ดหรือแท็บ “ปาร์ตี้” ไม่ต้องรัน migration
+
+## คอลัมน์ที่ไม่ได้ใช้แล้ว
+
+- `parties.content` / `parties.members` — display cache รุ่นเก่า เขียน `NULL` / `'[]'` เสมอ
+- `members.active` — ถูกล้างแถว `active = 0` ทิ้งหนึ่งครั้งตอน cold start
+  (`dropBenchedMembers`) แล้วไม่มีโค้ดอ่านอีก
 
 ## คลาสเก็บเป็นชื่อ ไม่ใช่เลข
 
@@ -59,30 +90,19 @@ UPDATE members SET job = 'ชื่อใหม่' WHERE job = 'ชื่อเ
 
 ทำก่อนแก้ `jobs.ts` เสมอ
 
-## ใส่ข้อมูลตัวอย่าง (ไม่บังคับ)
+## ข้อมูลทดสอบสำหรับสคริปต์
 
-ถ้าอยากดูหน้าเว็บที่มีข้อมูลของจริงแต่ยังไม่อยากกรอกเอง มีชุดตัวอย่างให้ —
-150 สมาชิก (มีชื่อไทด้วย) · ประวัติย้อนหลัง 8 สัปดาห์ · ปาร์ตี้ 14 ทีมครบทุกบอร์ด
+แอปไม่มี seed route แล้ว (`lib/seed.ts` และ `POST /api/admin/seed` ถูกลบตอนเฟส 4)
+สคริปต์ตรวจงาน (`scripts/phase2-*`, `scripts/phase3-check.mjs`) สร้างข้อมูลเองผ่าน
+`scripts/fixture.mjs` — รับเฉพาะ `file:` URL เพราะมันลบปาร์ตี้/สมาชิกทั้งหมดก่อนเขียน
 
 ```bash
-npm run dev
-# ล็อกอินผู้ดูแลก่อน แล้วค่อย
-curl -X POST http://localhost:3000/api/admin/seed
+npm run dev   # คนละ terminal กับฐานข้อมูลชั่วคราว
+PHASE2_BASE_URL=http://localhost:3311 \
+  node scripts/fixture.mjs file:/tmp/phase2.db
 ```
 
-ต้องล็อกอินก่อน เพราะมันเขียนทั้งสามตาราง
-
-| พารามิเตอร์ | ทำอะไร |
-| --- | --- |
-| `?reset=1` | เขียนทับข้อมูลเดิม — **ไม่ใส่จะถูกปฏิเสธถ้ามีสมาชิกอยู่แล้ว** |
-| `?weeks=8` | จำนวนสัปดาห์ย้อนหลังของประวัติ (ค่าเริ่มต้น 8) |
-| `?seed=123` | ใช้ตัวสุ่มค่าอื่น เพื่อได้กิลด์คนละชุด |
-
-ข้อมูลถูกเขียนเป็น **transaction เดียว** ล้มเหลวกลางคันไม่ได้
-
-**อย่าเรียกกับฐานข้อมูลที่มีรายชื่อจริงแล้ว** — ชื่อในชุดตัวอย่างสังเกตง่าย
-แต่ถ้ามันไปแทนที่ของจริง กู้จากจุดนั้นไม่ได้ ให้ลบ `app/api/admin/seed/` ทิ้งไปเลย
-หลังใส่รายชื่อจริงเสร็จ
+**ห้ามชี้ไปที่ Turso จริง** — fixture ลบข้อมูลทั้งชุด
 
 ## ดูข้อมูล
 
@@ -93,6 +113,23 @@ turso db shell guild          # เปิด sqlite shell
 หรือหน้าเว็บ https://turso.tech → database ของคุณ → Browse
 
 ## สำรองข้อมูล
+
+```bash
+node scripts/turso-backup.mjs [label]
+```
+
+เขียน `backups/turso-parties-backup-<ts>[-label].json` (ตารางปาร์ตี้ทั้งหมด +
+`members` / `attendance`) · กู้คืนด้วย
+
+```bash
+node scripts/turso-restore.mjs backups/turso-parties-backup-....json
+```
+
+ค่าเริ่มต้นคืนเฉพาะตารางปาร์ตี้ + `app_meta`; ใส่ `--all` ถ้าต้องการ `members` /
+`attendance` ด้วย · `backups/` อยู่ใน `.gitignore` เพราะมีชื่อสมาชิกทั้งกิลด์
+**ห้าม commit**
+
+หรือใช้ CLI ดิบ:
 
 ```bash
 turso db shell guild .dump > backup.sql

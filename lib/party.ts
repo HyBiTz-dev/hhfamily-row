@@ -1,26 +1,22 @@
 /**
  * Party composition helpers.
  *
- * Parties live in the sheet only — the builder writes the tab directly, so
- * there is no browser-side copy to keep in sync. `parseParties` is the guard
- * on the way back in: request bodies and sheet cells are both untrusted.
+ * `Party.placements` says which events a team plays; the normal rows and
+ * `event_rows` say where it sits. `parseParties`/`parseEventRows` are the
+ * guards on the way in from a request body.
  */
 
 import { JOBS } from "./rngw/jobs";
 import {
-  clearEventSegment,
-  contentSegments,
+  APPEND_POSITION,
   EVENT_CATEGORIES,
   LEAGUE_DIVISIONS,
-  matchDivision,
-  matchEventCategory,
-  rowContentLabel,
-  SEGMENT_SEPARATOR,
-  setEventSegment,
-  UNASSIGNED_ROW,
+  getDivision,
+  getEventCategory,
   type EventCategoryId,
+  type LeagueDivisionId,
 } from "./rngw/categories";
-import type { MemberStatus, Party } from "./rngw/types";
+import type { EventRow, MemberStatus, Party, PartyPlacement } from "./rngw/types";
 
 /* --------------------------------------------------------- pure helpers */
 
@@ -87,15 +83,15 @@ export function roleHint(job: string): string | undefined {
  * chip must not invent one.
  */
 export interface PartyLabelOption {
-  /** Matches `labelOptionId`, and doubles as the React key. */
+  /** Doubles as the React key. */
   id: string;
   /** The event this chip belongs to — several chips may share one (the two
    * leagues), which is why the id, not this, is what a chip is keyed by. */
   event: EventCategoryId;
+  /** `''` for events without league tabs. */
+  division: string;
   /** Chip text. */
   label: string;
-  /** What the chip writes into the label. */
-  content: string;
 }
 
 export function partyLabelOptions(): PartyLabelOption[] {
@@ -103,20 +99,20 @@ export function partyLabelOptions(): PartyLabelOption[] {
     {
       id: "guild-war",
       event: "guild-war",
+      division: "",
       label: "Guild War",
-      content: rowContentLabel("guild-war", UNASSIGNED_ROW),
     },
     {
       id: "polarity",
       event: "polarity",
+      division: "",
       label: "Polarity",
-      content: rowContentLabel("polarity", UNASSIGNED_ROW),
     },
     ...LEAGUE_DIVISIONS.map((division) => ({
       id: `guild-league:${division.id}`,
       event: "guild-league" as EventCategoryId,
+      division: division.id,
       label: division.label,
-      content: division.contentLabel,
     })),
   ];
 }
@@ -146,63 +142,58 @@ export function partyLabelGroups(): PartyLabelGroup[] {
   })).filter((group) => group.options.length > 0);
 }
 
-/**
- * Which chip one label segment names, or null when it names no event.
- *
- * Runs the same matching the event pages run rather than comparing strings, so
- * a party saved before this editor existed — with a hand-typed or misspelled
- * label — still lights the right chip. A Guild War box ("Guild War ทีมสเกา")
- * lights "Guild War"; the box itself is not this editor's business.
- */
-export function labelOptionId(segment: string): string | null {
-  const event = matchEventCategory(segment);
-  if (!event) return null;
-  const division = matchDivision(segment, event);
-  return division ? `${event}:${division}` : event;
-}
-
-/** Every chip a label lights, in the order its segments appear. */
-export function activeLabelIds(content: string | undefined): string[] {
+/** Every chip a set of placements lights, in placement order. */
+export function activeLabelIds(placements: PartyPlacement[]): string[] {
   const ids: string[] = [];
-  for (const segment of contentSegments(content)) {
-    const id = labelOptionId(segment);
-    if (id && !ids.includes(id)) ids.push(id);
+  for (const placement of placements) {
+    const id = placement.division
+      ? `${placement.event}:${placement.division}`
+      : placement.event;
+    if (!ids.includes(id)) ids.push(id);
   }
   return ids;
 }
 
 /**
- * The label a party is allowed to carry: whatever the chips can write, nothing else.
+ * Adds one event to the placements, or takes it back out — the chip toggle.
  *
- * A label exists to say which board a team belongs on, so a hand-typed segment
- * ("ปาร์ตี้บอส") has nothing to match: the team lands in no event at all and only
- * shows up in the "ว่าง" row of every page. The editor no longer accepts typing,
- * and this is the other half of that rule — labels already in the database
- * (typed before the chips existed, or by hand in Turso) are reduced to the
- * segments that name a real event when a party is opened or saved.
- */
-export function stripCustomLabels(content: string | undefined): string {
-  return contentSegments(content)
-    .filter((segment) => matchEventCategory(segment) !== null)
-    .join(SEGMENT_SEPARATOR);
-}
-
-/**
- * Adds one event to a label, or takes it back out — the chip toggle.
- *
- * A label may name several events, so this only touches that event's segment:
- * ticking Guild League on a "Guild War" party appends it and leaves the war
- * segment (and its box) untouched, and unticking it removes only the league
- * part. Switching ลีคหลัก to ลีครอง rewrites that one segment, box or not, because
- * a team cannot be in both divisions at once.
+ * Only that event's placement is touched: ticking Guild League on a Guild War
+ * party appends it and leaves the war box alone, and unticking it removes only
+ * the league entry. Switching ลีคหลัก to ลีครอง replaces that one placement, and
+ * the box resets to "ว่าง" because a box belongs to one division.
  */
 export function togglePartyLabel(
-  content: string,
+  placements: PartyPlacement[],
   option: PartyLabelOption
-): string {
-  return activeLabelIds(content).includes(option.id)
-    ? clearEventSegment(content, option.event)
-    : setEventSegment(content, option.event, option.content);
+): PartyPlacement[] {
+  const active = placements.some(
+    (placement) =>
+      placement.event === option.event && placement.division === option.division
+  );
+
+  if (active) {
+    return placements.filter(
+      (placement) =>
+        !(
+          placement.event === option.event &&
+          placement.division === option.division
+        )
+    );
+  }
+
+  const others = placements.filter((placement) => placement.event !== option.event);
+  return [
+    ...others,
+    {
+      event: option.event,
+      division: option.division,
+      rowId: null,
+      // A newly ticked event goes after the teams already on that board. The
+      // board sorts by this per scope, so a fixed 0 would slip it in front of
+      // a team the guild master placed first on purpose.
+      position: APPEND_POSITION,
+    },
+  ];
 }
 
 /* ------------------------------------------------------------- placement */
@@ -224,6 +215,34 @@ export function placementByMember(parties: Party[]): Map<string, string> {
     }
   }
   return map;
+}
+
+/* --------------------------------------------------------- member order */
+
+/**
+ * Puts `second` where `first` sits and vice versa, keeping every seat filled.
+ *
+ * The array order of `Party.memberNames` *is* the stored slot order: `saveParties`
+ * writes each name's index into `party_members.slot`, and the event boards read
+ * it back for their "ตามลำดับที่จัดไว้" member order. Reordering the array is
+ * therefore the whole feature — there is no second field to keep in sync.
+ *
+ * Returns the input unchanged when either name is missing or both are the same,
+ * so a stale name or a drop on itself can never reorder the list. Pure, so the
+ * rule is readable (and testable) without a browser.
+ */
+export function swapMemberSeats(
+  memberNames: string[],
+  first: string,
+  second: string
+): string[] {
+  const from = memberNames.indexOf(first);
+  const to = memberNames.indexOf(second);
+  if (from < 0 || to < 0 || from === to) return memberNames;
+
+  const next = [...memberNames];
+  [next[from], next[to]] = [next[to], next[from]];
+  return next;
 }
 
 /* ------------------------------------------------------------------ locks */
@@ -278,16 +297,24 @@ const RANDOM_PARTY_LABEL_IDS: readonly string[] = [
   "guild-league:lower",
 ];
 
-export function randomPartyLabel(): string {
+export function randomPartyPlacements(): PartyPlacement[] {
   const options = partyLabelOptions();
-  return RANDOM_PARTY_LABEL_IDS.map((id) => options.find((option) => option.id === id)?.content)
-    .filter((content): content is string => Boolean(content))
-    .join(SEGMENT_SEPARATOR);
+  return RANDOM_PARTY_LABEL_IDS.map((id) =>
+    options.find((option) => option.id === id)
+  )
+    .filter((option): option is PartyLabelOption => Boolean(option))
+    .map((option) => ({
+      event: option.event,
+      division: option.division,
+      rowId: null,
+      // A thrown-together team joins the end of every board it plays.
+      position: APPEND_POSITION,
+    }));
 }
 
 /**
  * A team of one is not a team, so the last odd person out is reported instead
- * of being written to the sheet as a party nobody asked for.
+ * of being written to the database as a party nobody asked for.
  *
  * Exported because the UI says the number too — the warning over the party grid
  * explains why "สุ่มปาร์ตี้" is disabled, and it must be the same 2 the planner
@@ -364,7 +391,7 @@ export function planRandomParties(
     parties.push({
       id: crypto.randomUUID(),
       name: `ปาร์ตี้ ${existing.length + parties.length + 1}`,
-      content: randomPartyLabel(),
+      placements: randomPartyPlacements(),
       memberNames: names,
       updatedAt: now,
     });
@@ -373,14 +400,16 @@ export function planRandomParties(
   return { parties, placed, leftOver: pool.map((member) => member.name) };
 }
 
+const EVENT_IDS = new Set<string>(EVENT_CATEGORIES.map((category) => category.id));
+const DIVISION_IDS = new Set<string>(LEAGUE_DIVISIONS.map((division) => division.id));
+
 /**
- * Untrusted input (a request body or a sheet row); keep only entries that look
- * sane, and only labels the chips could have written.
+ * Untrusted input from PUT /api/admin/parties.
  *
- * `stripCustomLabels` is here, not only in the editor: this is the gate every
- * write passes through, so a hand-crafted request cannot put a label back that
- * the UI no longer offers — and a party saved with one before the editor
- * changed is cleaned the first time anything writes the list.
+ * Everything structural is re-derived here: one placement per event, a
+ * placement only on an event the site knows, and a division only on Guild
+ * League. `rowId` is checked against the rows that actually exist later, in
+ * `saveParties` — a stale id becomes the "ว่าง" row rather than a dangling card.
  */
 export function parseParties(raw: string): Party[] {
   try {
@@ -395,23 +424,258 @@ export function parseParties(raw: string): Party[] {
 function toParty(value: unknown): Party[] {
   if (!value || typeof value !== "object") return [];
   const party = value as Partial<Party>;
-  if (typeof party.id !== "string" || typeof party.name !== "string") return [];
+  if (typeof party.id !== "string" || !party.id || typeof party.name !== "string") {
+    return [];
+  }
+
+  const byEvent = new Map<EventCategoryId, PartyPlacement>();
+  if (Array.isArray(party.placements)) {
+    party.placements.forEach((raw) => {
+      const placement = toPlacement(raw);
+      if (placement) byEvent.set(placement.event, placement);
+    });
+  }
+
+  const seen = new Set<string>();
+  const memberNames = (Array.isArray(party.memberNames) ? party.memberNames : [])
+    .filter((name): name is string => typeof name === "string" && name.length > 0)
+    .filter((name) => {
+      if (seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+
   return [
     {
       id: party.id,
       name: party.name,
-      content:
-        typeof party.content === "string"
-          ? stripCustomLabels(party.content) || undefined
-          : undefined,
-      memberNames: Array.isArray(party.memberNames)
-        ? party.memberNames.filter((name): name is string => typeof name === "string")
-        : [],
+      // A display cache. `saveParties` recomputes it from placements and rows.
+      content: undefined,
+      placements: [...byEvent.values()],
+      memberNames,
       // Only a real `true` locks. Anything else (missing, "false", 0) is an
       // unlocked party, because the alternative — a typo silently protecting a
       // team from deletion — is the worse mistake.
       locked: party.locked === true,
-      updatedAt: typeof party.updatedAt === "string" ? party.updatedAt : new Date().toISOString(),
+      updatedAt:
+        typeof party.updatedAt === "string"
+          ? party.updatedAt
+          : new Date().toISOString(),
+    },
+  ];
+}
+
+function toPlacement(value: unknown): PartyPlacement | null {
+  if (!value || typeof value !== "object") return null;
+  const placement = value as Partial<PartyPlacement>;
+  if (typeof placement.event !== "string" || !EVENT_IDS.has(placement.event)) {
+    return null;
+  }
+
+  const event = placement.event as EventCategoryId;
+  const division = typeof placement.division === "string" ? placement.division : "";
+  if (event === "guild-league") {
+    if (division !== "" && !DIVISION_IDS.has(division)) return null;
+  } else if (division !== "") {
+    return null;
+  }
+
+  return {
+    event,
+    division,
+    rowId:
+      typeof placement.rowId === "string" && placement.rowId
+        ? placement.rowId
+        : null,
+    position:
+      typeof placement.position === "number" && Number.isFinite(placement.position)
+        ? placement.position
+        : // No position from the client means "a placement we have not placed
+          // yet"; appending is the only order that cannot reorder the board.
+          APPEND_POSITION,
+  };
+}
+
+/* ------------------------------------------------------------------ boxes */
+
+/**
+ * Case- and space-insensitive key for a box name inside one scope.
+ *
+ * `event_rows` has a UNIQUE index on `(event, division, name)`, but it is
+ * case-sensitive: "ทีม A" and "ทีม a" both fit there while reading as the same
+ * box to a person. The board has always refused the second one (it folds with
+ * `toLocaleLowerCase`); folding here is what makes the server agree. Plain
+ * `toLowerCase`, not the locale-aware one, so the mapping cannot change with the
+ * machine's locale.
+ */
+export function foldRowName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** The scope (`event` + `division`) plus a folded name: what must be unique. */
+export function rowScopeKey(
+  event: string,
+  division: string,
+  name: string
+): string {
+  return `${event}\u0000${division}\u0000${foldRowName(name)}`;
+}
+
+/**
+ * Drops rows that cannot both be stored, and says where the dropped ones went.
+ *
+ * `event_rows` has a primary key on `id` and a unique index on
+ * `(event, division, name)`, so a client that repeats an id — or sends two boxes
+ * whose names differ only in case — would abort the whole write with a
+ * constraint error. That surfaces to the guild master as a 502 and a screen that
+ * "just fails". Dropping the later duplicate keeps the save working instead: the
+ * first row wins (so rows should be sorted into board order first), and `remap`
+ * sends any team parked in a dropped box to the surviving one rather than to
+ * "ว่าง".
+ *
+ * Runs in `normalizeEventRows`, the last gate before the INSERTs. Not in
+ * `parseEventRows`: the remap has to survive to where the placements are
+ * resolved, and the request guard would drop it.
+ *
+ * Pure, so the rule can be read (and tested) without a database.
+ */
+export function dedupeEventRows(rows: EventRow[]): {
+  rows: EventRow[];
+  remap: Map<string, string>;
+} {
+  const byId = new Map<string, EventRow>();
+  const byScope = new Map<string, EventRow>();
+  const remap = new Map<string, string>();
+  const out: EventRow[] = [];
+
+  for (const row of rows) {
+    // A repeated id is the same box sent twice; the survivor is itself.
+    const sameId = byId.get(row.id);
+    if (sameId) {
+      remap.set(row.id, sameId.id);
+      continue;
+    }
+
+    const sameName = byScope.get(rowScopeKey(row.event, row.division, row.name));
+    if (sameName) {
+      remap.set(row.id, sameName.id);
+      continue;
+    }
+
+    byId.set(row.id, row);
+    byScope.set(rowScopeKey(row.event, row.division, row.name), row);
+    out.push(row);
+  }
+
+  return { rows: out, remap };
+}
+
+/**
+ * Follows a dropped row id to the row that replaced it.
+ *
+ * `remap` only ever points a dropped id at a surviving one, so a single hop
+ * suffices; the loop and the `seen` guard exist so a malformed map can never
+ * spin forever.
+ */
+function resolveRowId(id: string, remap: Map<string, string>): string {
+  let current = id;
+  const seen = new Set<string>();
+  while (remap.has(current) && !seen.has(current)) {
+    seen.add(current);
+    current = remap.get(current) as string;
+  }
+  return current;
+}
+
+/**
+ * Drops placements that do not match a row of the same event and division.
+ *
+ * A deleted box therefore sends its teams to "ว่าง" without the caller having to
+ * remember to null every placement first. A box the dedupe dropped is followed
+ * through `remap`, so its teams move to the surviving box rather than to "ว่าง".
+ *
+ * Pure, and the last gate before the INSERTs (`normalizeEventRows` produces the
+ * rows and remap): a stale or cross-event `rowId` can never reach the database.
+ */
+export function normalizePlacements(
+  party: Party,
+  rows: EventRow[],
+  remap: Map<string, string>
+): PartyPlacement[] {
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  const byEvent = new Map<string, PartyPlacement>();
+
+  for (const placement of party.placements) {
+    if (!getEventCategory(placement.event)) continue;
+
+    const division =
+      placement.event === "guild-league" ? placement.division || "" : "";
+    if (
+      placement.event === "guild-league" &&
+      division &&
+      !getDivision(placement.event, division as LeagueDivisionId)
+    ) {
+      continue;
+    }
+
+    const row = placement.rowId
+      ? rowById.get(resolveRowId(placement.rowId, remap))
+      : undefined;
+    const rowId =
+      row && row.event === placement.event && row.division === division
+        ? row.id
+        : null;
+
+    // One placement per event: if a request repeats an event, the last one
+    // wins, matching `parseParties`.
+    byEvent.set(placement.event, {
+      event: placement.event,
+      division,
+      rowId,
+      position: placement.position,
+    });
+  }
+
+  return [...byEvent.values()];
+}
+
+/** Untrusted rows from the same request; ids are the stable box identity. */
+export function parseEventRows(raw: string): EventRow[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap(toEventRow);
+  } catch {
+    return [];
+  }
+}
+
+function toEventRow(value: unknown): EventRow[] {
+  if (!value || typeof value !== "object") return [];
+  const row = value as Partial<EventRow>;
+  if (typeof row.id !== "string" || !row.id || typeof row.name !== "string") return [];
+  const name = row.name.trim();
+  if (!name) return [];
+  if (typeof row.event !== "string" || !EVENT_IDS.has(row.event)) return [];
+
+  const event = row.event as EventCategoryId;
+  const division = typeof row.division === "string" ? row.division : "";
+  if (event === "guild-league") {
+    if (!DIVISION_IDS.has(division)) return [];
+  } else if (division !== "") {
+    return [];
+  }
+
+  return [
+    {
+      id: row.id,
+      event,
+      division,
+      name,
+      position:
+        typeof row.position === "number" && Number.isFinite(row.position)
+          ? row.position
+          : 0,
     },
   ];
 }

@@ -20,6 +20,7 @@ import { SubmitForm } from "@/components/leave/submit-form"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { AttendanceStatus, RosterResponse } from "@/lib/rngw/types"
+import { formatGuildDay } from "@/lib/rngw/day"
 import { cn } from "cn"
 
 /**
@@ -34,22 +35,6 @@ const TAB_ORDER = [
   "present",
   "unknown",
 ] as const satisfies readonly AttendanceStatus[]
-
-/**
- * `date` is a guild-local calendar day ("2026-10-14"), not an instant — so it
- * is parsed as UTC midnight and formatted as UTC, to avoid shifting it back a
- * day for viewers west of Greenwich.
- */
-function formatDate(date: string) {
-  const parsed = new Date(`${date}T00:00:00Z`)
-  if (Number.isNaN(parsed.getTime())) return date
-  return new Intl.DateTimeFormat("th-TH", {
-    timeZone: "UTC",
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-  }).format(parsed)
-}
 
 export function LeaveBoard() {
   const [data, setData] = React.useState<RosterResponse | null>(null)
@@ -124,7 +109,7 @@ export function LeaveBoard() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">เช็คชื่อวันนี้</h1>
           <p className="text-muted-foreground text-sm">
-            {formatDate(data.date)}
+            {formatGuildDay(data.date)}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>

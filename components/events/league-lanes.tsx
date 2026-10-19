@@ -18,38 +18,43 @@ import {
 } from "@dnd-kit/core"
 import { ChevronDown, ChevronUp, GripVertical, MoveHorizontal, Pencil, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { GameIcon } from "@/components/game-icon"
 import { AddMemberCombobox } from "@/components/events/add-member-combobox"
+import type { MemberDropRequest } from "@/components/events/member-drop-dialog"
 import { DragSafe } from "@/components/drag-safe"
 import { NameDialog } from "@/components/events/name-dialog"
 import { TeamEditDialog } from "@/components/events/team-edit-dialog"
 import { TeamCard } from "@/components/events/team-card"
 import { TEAM_MAX_MEMBERS } from "@/lib/party"
 import {
-  defaultLaneId,
+  UNASSIGNED_ROW,
   type LeagueLane,
   type LeagueLaneId,
 } from "@/lib/rngw/categories"
-import type { MemberStatus, Party } from "@/lib/rngw/types"
+import type { MemberStatus, Party, PartyPlacement } from "@/lib/rngw/types"
 import { cn } from "cn"
 
 /** A team of a lane board, with the lane it resolves to already worked out. */
 export type TeamInLane = Party & { lane: LeagueLaneId };
 
 /**
+ * Droppable ids for the cards themselves. Namespaced so a card id can never be
+ * mistaken for a lane id (lanes are uuids) or a player's seat.
+ */
+const TEAM_CARD_PREFIX = "team-card:";
+
+/**
  * The rows of one scope, with teams dragged between them.
  *
- * A row is only a label on the party (`Party.content`), so dropping a card
- * changes one string and rewrites the tab — see `replaceDivisionParties`. No
- * player moves, which is why a division's fixed headcount can't be broken by
- * dragging: a team keeps its members wherever it lands.
+ * A row is a stored `event_rows` container. Dropping a card changes only that
+ * party's placement for this event, so no player moves and the division
+ * headcount cannot be broken by dragging.
  *
- * The same board serves Guild League's fixed lanes and Guild War's boxes, which
- * are named by the guild master instead. That is the difference for the rows
- * themselves: `onReorderRow`, `onRenameRow` and `onDeleteRow` are passed for
- * Guild War only, because a league lane is the game's, not theirs. The controls
- * that belong to a *team* rather than a row — `onRenameTeam`, `onAddMember`,
- * `onRemoveMember` — are offered on every board, since a team and its members
- * are the guild master's wherever the team sits.
+ * Every row is the guild master's, including the league divisions: rows can be
+ * added, renamed, reordered and deleted on any board. Deleting one sends its
+ * teams to "ว่าง" rather than deleting them. The controls that belong to a
+ * *team* — `onRenameTeam`, `onAddMember`, `onRemoveMember` — are offered on
+ * every board too.
  *
  * Mobile is the main device here, so the touch sensor waits for a long press
  * before grabbing the card; a short swipe still scrolls the page. That is the
@@ -65,11 +70,16 @@ export function LaneBoard({
   onMoveTeam,
   onReorderRow,
   onMoveRow,
+  onReorderTeam,
+  onMoveTeamInRow,
   onRenameRow,
   onRenameTeam,
   onRemoveMember,
   onAddMember,
+  onMemberDrop,
+  onReorderMember,
   onDeleteRow,
+  onCheckIn,
 }: {
   lanes: readonly LeagueLane[]
   /** Every team of the scope, each tagged with the row it shows in. */
@@ -82,34 +92,65 @@ export function LaneBoard({
   /** The member's own name — highlighted on the cards. */
   query?: string
   onMoveTeam: (teamId: string, lane: LeagueLane) => void | Promise<void>
-  /** Swaps two named rows. Guild War only — a league lane is the game's. */
+  /** Swaps two named rows. Every row is the guild master's. */
   onReorderRow?: (fromId: string, toId: string) => void | Promise<void>
   /** Keyboard equivalent of the drag: nudge one row up or down by one. */
   onMoveRow?: (rowId: string, delta: -1 | 1) => void
-  /** Renames a named box. Guild War only — a league lane is the game's. */
+  /**
+   * Reorders a card inside its box. The page owns the write: positions are
+   * dense per event and the whole scope has to be rewritten in one PUT.
+   */
+  onReorderTeam?: (fromId: string, toId: string) => void | Promise<void>
+  /** Keyboard equivalent of the card drag: nudge one card up or down. */
+  onMoveTeamInRow?: (teamId: string, delta: -1 | 1) => void
+  /** Renames a named box. Every row is the guild master's. */
   onRenameRow?: (lane: LeagueLane, nextName: string) => void | Promise<void>
   /**
    * Renames a team and may relabel it, from the pencil on its card.
    *
-   * Guild War only: a league lane is the game's, but the team inside it is the
-   * guild master's, and fixing a typo or a wrong label is what that pencil is
-   * for. The label can move the team to another page or another division — the
-   * board writes the whole parties tab, so it lands wherever it now belongs.
+   * The team inside every row is the guild master's, and fixing a typo or a
+   * wrong event/division is what that pencil is for. The placements can move
+   * the team to another page or another division — the board writes the whole
+   * parties tab, so it lands wherever it now belongs.
    */
   onRenameTeam?: (
     teamId: string,
     nextName: string,
-    nextContent: string
+    nextPlacements: PartyPlacement[]
   ) => void | Promise<void>
-  /** Takes a member off a team. Guild War only. */
+  /** Takes a member off a team. */
   onRemoveMember?: (teamId: string, name: string) => void | Promise<void>
-  /** Puts a member on a team, after the board confirms a move. Guild War only. */
+  /** Puts a member on a team, after the board confirms a move. */
   onAddMember?: (teamId: string, name: string) => void | Promise<void>
-  /** Removes the whole row. Guild War only — see `onDeleteRow`. */
+  /**
+   * A player was dropped onto another player's row.
+   *
+   * The board only says which two seats; the page asks whether that means
+   * "swap" or "add to the team" (see `MemberDropDialog`), because both readings
+   * look identical while dragging. Passing this also switches on row dragging.
+   */
+  onMemberDrop?: (request: MemberDropRequest) => void
+  /**
+   * A player was dropped onto a teammate's row: swap their seats, which changes
+   * the order the card lists them in. Same event, so nothing leaves the team.
+   */
+  onReorderMember?: (teamId: string, name: string, targetName: string) => void
+  /** Removes the whole row; its teams move to "ว่าง". */
   onDeleteRow?: (lane: LeagueLane) => void
+  /**
+   * Opens the check-in dialog for a member whose name was tapped.
+   *
+   * Passed on every board, including the guild master's: the person holding the
+   * phone may be both. The name button is wrapped in `DragSafe` so the drag
+   * sensor does not swallow the tap.
+   */
+  onCheckIn?: (name: string) => void
 }) {
   const [dragging, setDragging] = React.useState<
-    { kind: "team"; team: TeamInLane } | { kind: "row"; lane: LeagueLane } | null
+    | { kind: "team"; team: TeamInLane }
+    | { kind: "row"; lane: LeagueLane }
+    | { kind: "member"; name: string; member?: MemberStatus }
+    | null
   >(null)
 
   /**
@@ -150,7 +191,7 @@ export function LaneBoard({
     return grouped
   }, [lanes, teams])
 
-  const fallbackLane = defaultLaneId(lanes)
+  const fallbackLane = UNASSIGNED_ROW.id
   // The parking row ("ว่าง") is not a box the guild master named, so it is never
   // counted or moved — only the named boxes reorder among themselves.
   const namedLanes = lanes.filter((lane) => lane.suffix !== "")
@@ -173,21 +214,81 @@ export function LaneBoard({
 
   /*
     A dragged row is a thin header, so overlap-based picking is unreliable —
-    nearest-centre finds the row the pointer is over. Teams keep the default,
-    where the card's own rectangle decides.
+    nearest-centre finds the row the pointer is over.
+
+    A dragged card is now both a lane member and a position hint: the card under
+    the pointer decides "put it here" inside a box, while an empty part of a row
+    still means "move it into this row". Cards win over their enclosing lane.
+
+    A dragged player is different again: the row is a drop target inside a lane
+    that is also a drop target, and the lane is usually reported first. A player
+    only ever drops onto another player here, so promote the seat when both
+    intersect rather than guessing.
   */
-  const collisionDetection: CollisionDetection = (args) =>
-    args.active.data.current?.type === "row" ? closestCenter(args) : rectIntersection(args)
+  const collisionDetection: CollisionDetection = (args) => {
+    const type = args.active.data.current?.type
+    // Seat ids are namespaced by `BoardMemberRow`; matching the id avoids
+    // trusting dnd-kit's loosely typed `Collision.data`.
+    const isSeat = (collision: { id: string | number }) =>
+      String(collision.id).startsWith("member-seat:")
+    const isCard = (collision: { id: string | number }) =>
+      String(collision.id).startsWith("team-card:")
+    // The card being dragged is still mounted and droppable; without this it
+    // would collide with itself and the drop would look like a no-op.
+    const ownCard = `team-card:${String(args.active.id)}`
+
+    if (type === "row") {
+      // A row is reordered onto another row; cards and seats are not rows.
+      const laneIds = new Set(lanes.map((lane) => String(lane.id)))
+      return closestCenter(args).filter((collision) =>
+        laneIds.has(String(collision.id))
+      )
+    }
+
+    const collisions = rectIntersection(args).filter(
+      (collision) => String(collision.id) !== ownCard
+    )
+
+    if (type === "member") {
+      // A dragged player belongs to a seat, never to a card.
+      const withoutCards = collisions.filter((collision) => !isCard(collision))
+      const seat = withoutCards.find(isSeat)
+      if (!seat) return withoutCards
+      return [
+        seat,
+        ...withoutCards.filter((collision) => collision.id !== seat.id),
+      ]
+    }
+
+    // A dragged team belongs to the lane, never to a player's row inside it.
+    const withoutSeats = collisions.filter((collision) => !isSeat(collision))
+    const card = withoutSeats.find(isCard)
+    if (!card) return withoutSeats
+    return [
+      card,
+      ...withoutSeats.filter((collision) => collision.id !== card.id),
+    ]
+  }
 
   function handleDragStart(event: DragStartEvent) {
     // A real drag supersedes a pending button move: the finger has already
     // decided it wants the long-press path, so the board should not also be
     // waiting for a tap on a row.
     setMovingTeamId(null)
-    const data = event.active.data.current as { type?: string; rowId?: string } | undefined
+    const data = event.active.data.current as
+      | { type?: string; rowId?: string; name?: string; from?: string }
+      | undefined
     if (data?.type === "row") {
       const lane = lanes.find((entry) => entry.id === data.rowId)
       setDragging(lane ? { kind: "row", lane } : null)
+      return
+    }
+    if (data?.type === "member" && data.name) {
+      setDragging({
+        kind: "member",
+        name: data.name,
+        member: byName.get(data.name),
+      })
       return
     }
     const team = teams.find((entry) => entry.id === event.active.id)
@@ -195,10 +296,41 @@ export function LaneBoard({
   }
 
   function handleDragEnd(event: DragEndEvent) {
-    const data = event.active.data.current as { type?: string; rowId?: string } | undefined
+    const data = event.active.data.current as
+      | { type?: string; rowId?: string; name?: string; from?: string }
+      | undefined
     const overId = event.over?.id
     setDragging(null)
     if (overId === undefined || overId === null) return
+
+    if (data?.type === "member") {
+      const overData = event.over?.data.current as
+        | { type?: string; teamId?: string; name?: string }
+        | undefined
+      if (
+        overData?.type === "member-seat" &&
+        overData.teamId &&
+        overData.name &&
+        data.name &&
+        data.from
+      ) {
+        if (data.from === overData.teamId) {
+          // Dropped on a teammate: swap seats. With nowhere to go this is one
+          // tap to undo, so it writes straight away instead of asking.
+          if (data.name !== overData.name) {
+            onReorderMember?.(data.from, data.name, overData.name)
+          }
+        } else {
+          onMemberDrop?.({
+            name: data.name,
+            fromTeamId: data.from,
+            targetTeamId: overData.teamId,
+            targetName: overData.name,
+          })
+        }
+      }
+      return
+    }
 
     if (data?.type === "row") {
       const fromId = data.rowId
@@ -212,6 +344,25 @@ export function LaneBoard({
     }
 
     const team = teams.find((entry) => entry.id === event.active.id)
+
+    // Dropped onto another card: same box = reorder, another box = the same
+    // move the row drop already performed. A card in another box is the target
+    // the finger was over, so treating it as "move into that box" is the
+    // reading that changes something.
+    const overData = event.over?.data.current as
+      | { type?: string; teamId?: string; lane?: string }
+      | undefined
+    if (overData?.type === "team-card" && overData.teamId && team) {
+      if (overData.teamId === team.id) return
+      if (overData.lane && overData.lane !== team.lane) {
+        const lane = lanes.find((entry) => entry.id === overData.lane)
+        if (lane) void onMoveTeam(team.id, lane)
+        return
+      }
+      void onReorderTeam?.(team.id, overData.teamId)
+      return
+    }
+
     const lane = lanes.find((entry) => entry.id === overId)
     if (!team || !lane || team.lane === lane.id) return
     void onMoveTeam(team.id, lane)
@@ -239,6 +390,10 @@ export function LaneBoard({
       <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
         <MoveHorizontal className="size-3.5 shrink-0" aria-hidden />
         กดปุ่ม “ย้าย” ที่มุมการ์ดทีม แล้วแตะกล่องปลายทางที่ต้องการ
+        {(onMemberDrop || onReorderMember) &&
+          " · ลากชื่อผู้เล่นไปวางบนชื่ออีกคน — ในทีมเดียวกันสลับลำดับ ในทีมอื่นเลือกสลับหรือเพิ่มเข้าทีม"}
+        {onReorderTeam &&
+          " · ลากการ์ดไปวางบนการ์ดอื่นในกล่องเดียวกันเพื่อสลับลำดับทีม (บนมือถือใช้ปุ่ม ↑↓ บนการ์ด)"}
         {canReorder && " · สลับลำดับกล่องด้วยปุ่ม ↑↓ ที่หัวแถว"}
       </p>
 
@@ -298,10 +453,13 @@ export function LaneBoard({
               onRenameTeam={onRenameTeam}
               onAddMember={onAddMember}
               onRemoveMember={onRemoveMember}
+              onMoveTeamInRow={onMoveTeamInRow}
+              draggableMembers={Boolean(onMemberDrop || onReorderMember)}
               reorderable={reorderable}
               canMoveUp={reorderable && namedIndex > 0}
               canMoveDown={reorderable && namedIndex < namedLanes.length - 1}
               onMoveRow={onMoveRow}
+              onCheckIn={onCheckIn}
               dragging={dragging?.kind === "row" && dragging.lane.id === lane.id}
               movingTeamId={movingTeamId}
               onStartMove={setMovingTeamId}
@@ -328,6 +486,8 @@ export function LaneBoard({
           />
         ) : dragging?.kind === "row" ? (
           <RowPreview lane={dragging.lane} />
+        ) : dragging?.kind === "member" ? (
+          <MemberPreview name={dragging.name} member={dragging.member} />
         ) : null}
       </DragOverlay>
     </DndContext>
@@ -339,6 +499,22 @@ function RowPreview({ lane }: { lane: LeagueLane }) {
   return (
     <div className="bg-popover text-popover-foreground rounded-lg border px-3 py-2 text-base font-semibold shadow-md">
       {lane.label}
+    </div>
+  )
+}
+
+/** The name chip that follows the pointer while a player is being moved. */
+function MemberPreview({
+  name,
+  member,
+}: {
+  name: string
+  member?: MemberStatus
+}) {
+  return (
+    <div className="bg-popover text-popover-foreground flex items-center gap-2 rounded-lg border px-3 py-1.5 shadow-md">
+      {member && <GameIcon job={member.job} className="size-6" />}
+      <span className="text-sm font-medium">{name}</span>
     </div>
   )
 }
@@ -355,6 +531,8 @@ function LaneRow({
   onRenameTeam,
   onAddMember,
   onRemoveMember,
+  onMoveTeamInRow,
+  draggableMembers = false,
   reorderable = false,
   canMoveUp = false,
   canMoveDown = false,
@@ -363,6 +541,7 @@ function LaneRow({
   movingTeamId = null,
   onStartMove,
   onMoveHere,
+  onCheckIn,
 }: {
   lane: LeagueLane
   teams: TeamInLane[]
@@ -377,12 +556,16 @@ function LaneRow({
   onRenameTeam?: (
     teamId: string,
     nextName: string,
-    nextContent: string
+    nextPlacements: PartyPlacement[]
   ) => void | Promise<void>
   /** Adds a member to a team in this row. Guild War only. */
   onAddMember?: (teamId: string, name: string) => void | Promise<void>
   /** Removes a member from a team in this row. Guild War only. */
   onRemoveMember?: (teamId: string, name: string) => void | Promise<void>
+  /** Keyboard (no-drag) equivalent of the card reorder. */
+  onMoveTeamInRow?: (teamId: string, delta: -1 | 1) => void
+  /** Admin board: each member row can be dragged onto another row. */
+  draggableMembers?: boolean
   /** Whether this row shows a drag handle and nudge buttons. */
   reorderable?: boolean
   canMoveUp?: boolean
@@ -396,6 +579,8 @@ function LaneRow({
   onStartMove?: (teamId: string) => void
   /** Drops the pending team into this row. Absent when no move is pending. */
   onMoveHere?: (lane: LeagueLane) => void
+  /** Opens the check-in dialog for a tapped member name. */
+  onCheckIn?: (name: string) => void
 }) {
   // The whole row is the drop target, so a team can be dropped into an empty
   // lane — not only onto another card.
@@ -414,8 +599,8 @@ function LaneRow({
 
   const players = teams.reduce((total, team) => total + team.memberNames.length, 0)
   const searching = Boolean(query?.trim())
-  // A row with no suffix is the "ยังไม่ได้ระบุ" parking spot, not a box the
-  // guild master named — there is nothing to delete there.
+  // A row with no suffix is the parking spot for teams not yet put in a box,
+  // not a box the guild master named — there is nothing to delete there.
   const deletable = Boolean(onDelete) && lane.suffix !== ""
   // Same rule as deleting: the parking row has no name to change.
   const renamable = Boolean(onRename) && lane.suffix !== ""
@@ -485,7 +670,7 @@ function LaneRow({
         </p>
         {unparked > 0 && !searching && (
           <p className="text-muted-foreground text-xs">
-            รวม {unparked} ทีมที่ยังไม่ได้ระบุว่าอยู่แถวไหน — ลากไปแถวไหนก็ได้
+            รวม {unparked} ทีมที่ยังไม่ถูกจัดเข้ากล่อง — ลากไปกล่องไหนก็ได้
           </p>
         )}
 
@@ -538,9 +723,9 @@ function LaneRow({
                     ? "กล่องนี้ยังว่างอยู่ — เปลี่ยนชื่อได้เลย"
                     : `ทีมในกล่องนี้ ${teams.length} ทีมจะย้ายมาอยู่ใต้ชื่อใหม่ — คนในทีมไม่เปลี่ยน`
                 }
-                fieldLabel="ชื่อทีมใหญ่"
+                fieldLabel="ชื่อกล่อง"
                 initialValue={lane.label}
-                placeholder="เช่น ทีมใหญ่ 1"
+                placeholder="เช่น กล่อง A"
                 submitLabel="เปลี่ยนชื่อ"
                 onSubmit={(name) => onRename?.(lane, name)}
               />
@@ -567,7 +752,7 @@ function LaneRow({
         </p>
       ) : (
         <div className="flex flex-wrap gap-2">
-          {teams.map((team) => (
+          {teams.map((team, index) => (
             <DraggableTeam
               key={team.id}
               team={team}
@@ -577,8 +762,13 @@ function LaneRow({
               onRename={onRenameTeam}
               onAddMember={onAddMember}
               onRemoveMember={onRemoveMember}
+              draggableMembers={draggableMembers}
               moving={team.id === movingTeamId}
               onStartMove={onStartMove}
+              onCheckIn={onCheckIn}
+              canMoveUp={Boolean(onMoveTeamInRow) && index > 0}
+              canMoveDown={Boolean(onMoveTeamInRow) && index < teams.length - 1}
+              onMove={onMoveTeamInRow}
             />
           ))}
         </div>
@@ -595,8 +785,13 @@ function DraggableTeam({
   onRename,
   onAddMember,
   onRemoveMember,
+  draggableMembers = false,
   moving = false,
   onStartMove,
+  onCheckIn,
+  canMoveUp = false,
+  canMoveDown = false,
+  onMove,
 }: {
   team: TeamInLane
   byName: Map<string, MemberStatus>
@@ -605,18 +800,44 @@ function DraggableTeam({
   onRename?: (
     teamId: string,
     nextName: string,
-    nextContent: string
+    nextPlacements: PartyPlacement[]
   ) => void | Promise<void>
   onAddMember?: (teamId: string, name: string) => void | Promise<void>
   onRemoveMember?: (teamId: string, name: string) => void | Promise<void>
+  /** Admin board: each member row can be dragged onto another row. */
+  draggableMembers?: boolean
   /** This card is the one picked up, waiting for a destination row. */
   moving?: boolean
   onStartMove?: (teamId: string) => void
+  /** Opens the check-in dialog for a tapped member name. */
+  onCheckIn?: (name: string) => void
+  /** Whether the card has a neighbour above/below in its own box. */
+  canMoveUp?: boolean
+  canMoveDown?: boolean
+  /** Nudges the card one place inside its box (the no-drag path). */
+  onMove?: (teamId: string, delta: -1 | 1) => void
 }) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
     id: team.id,
     data: { type: "team", lane: team.lane },
   })
+
+  /*
+    The card is also a drop target so a card dropped on it means "this place in
+    this box". The lane remains the target for empty space, which is why the
+    collision detector promotes a card over its enclosing row.
+  */
+  const { setNodeRef: setCardDropRef, isOver } = useDroppable({
+    id: `${TEAM_CARD_PREFIX}${team.id}`,
+    data: { type: "team-card", teamId: team.id, lane: team.lane },
+  })
+  const setNodeRef = React.useCallback(
+    (node: HTMLElement | null) => {
+      setDragRef(node)
+      setCardDropRef(node)
+    },
+    [setDragRef, setCardDropRef]
+  )
 
   return (
     <div
@@ -634,7 +855,8 @@ function DraggableTeam({
         "w-full max-w-72 cursor-grab rounded-xl active:cursor-grabbing",
         // The card being moved stays put and lit while the rows light up, so the
         // eye can follow what is about to happen.
-        moving && "ring-primary cursor-pointer ring-2"
+        moving && "ring-primary cursor-pointer ring-2",
+        isOver && "ring-primary ring-2"
       )}
     >
       <TeamCard
@@ -642,6 +864,36 @@ function DraggableTeam({
         byName={byName}
         grip={<GripVertical className="size-4" />}
         query={query}
+        onCheckIn={onCheckIn}
+        draggableMembers={draggableMembers}
+        order={
+          onMove ? (
+            <DragSafe className="sm:hidden">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground size-8 touch-manipulation sm:size-6"
+                aria-label={`เลื่อน ${team.name} ขึ้น`}
+                title={`เลื่อน ${team.name} ขึ้น`}
+                disabled={!canMoveUp}
+                onClick={() => onMove(team.id, -1)}
+              >
+                <ChevronUp />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground size-8 touch-manipulation sm:size-6"
+                aria-label={`เลื่อน ${team.name} ลง`}
+                title={`เลื่อน ${team.name} ลง`}
+                disabled={!canMoveDown}
+                onClick={() => onMove(team.id, 1)}
+              >
+                <ChevronDown />
+              </Button>
+            </DragSafe>
+          ) : undefined
+        }
         move={
           onStartMove ? (
             <DragSafe>
@@ -676,8 +928,10 @@ function DraggableTeam({
                 </DragSafe>
               }
               teamName={team.name}
-              initialContent={team.content}
-              onSubmit={({ name, content }) => onRename(team.id, name, content)}
+              initialPlacements={team.placements}
+              onSubmit={({ name, placements }) =>
+                onRename(team.id, name, placements)
+              }
             />
           ) : undefined
         }

@@ -26,10 +26,14 @@ export function SiteHeader() {
 
   return (
     <header className="bg-background/95 sticky top-0 z-10 border-b backdrop-blur">
-      <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-1 px-4">
-        <span className="mr-2 shrink-0 text-sm font-semibold tracking-tight">
+      <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-1 px-4 sm:h-16">
+        <Link
+          href="/"
+          aria-current={pathname === "/" ? "page" : undefined}
+          className="mr-2 shrink-0 text-sm font-semibold tracking-tight transition-colors hover:text-muted-foreground sm:mr-4 sm:text-lg"
+        >
           กิลด์ HHFamily
-        </span>
+        </Link>
 
         {/*
           Mobile menu. Measured at 320px: brand + 3 nav links + admin button +

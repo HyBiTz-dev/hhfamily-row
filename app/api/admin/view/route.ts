@@ -19,7 +19,8 @@ export async function GET(request: Request) {
   const date = url.searchParams.get("date") ?? guildDateKey(new Date(), timeZone);
 
   try {
-    const { members, attendance, parties } = await readAll();
+    const { members, attendance, parties, eventRows, partyVersion } =
+      await readAll();
     return Response.json({
       date,
       timeZone,
@@ -27,6 +28,9 @@ export async function GET(request: Request) {
       allMembers: members,
       attendance,
       parties,
+      eventRows,
+      // Optimistic-lock token for the parties tab; a write sends it back.
+      partyVersion,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

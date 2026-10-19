@@ -20,23 +20,24 @@ import { LaneBoard, type TeamInLane } from "@/components/events/league-lanes"
 import { TeamCard } from "@/components/events/team-card"
 import { NameDialog } from "@/components/events/name-dialog"
 import { PartyDialog } from "@/components/events/party-dialog"
+import { CheckInDialog } from "@/components/events/check-in-dialog"
+import {
+  MemberDropDialog,
+  type MemberDropRequest,
+} from "@/components/events/member-drop-dialog"
 import { MemberPlacementProvider } from "@/components/member-placement"
 import { useAdminSession } from "@/hooks/use-admin-session"
 import {
-  boxRow,
   divisionHeadcount,
   getDivision,
   getEventCategory,
-  hasExplicitLane,
-  laneContentLabel,
-  matchRow,
   partiesForDivision,
   partiesForEvent,
-  replaceDivisionParties,
-  replaceEventParties,
-  rowContentLabel,
+  partyRowId,
+  partyRowKey,
   rowsForScope,
-  setEventSegment,
+  setPartyPlacement,
+  sortTeamsForScope,
   UNASSIGNED_ROW,
   type EventCategory,
   type EventCategoryId,
@@ -45,16 +46,21 @@ import {
   type LeagueLane,
 } from "@/lib/rngw/categories"
 import { filterTeamsByQuery, teamMatchesQuery } from "@/lib/rngw/team-search"
-import { stripCustomLabels } from "@/lib/party"
-import type { MemberStatus, Party, RosterResponse } from "@/lib/rngw/types"
+import { TEAM_MAX_MEMBERS, foldRowName, swapMemberSeats } from "@/lib/party"
+import type {
+  EventRow,
+  MemberStatus,
+  Party,
+  PartyPlacement,
+  RosterResponse,
+} from "@/lib/rngw/types"
 
 /**
  * One screen per guild event, shared by /guild-war and /guild-league.
  *
- * There is no per-event data on the database: both pages are filters over the
- * same parties tab, told apart by `Party.content` (see lib/rngw/categories.ts).
- * That is also why the editor has to send back every other party's row — see
- * `replaceEventParties`.
+ * A party plays an event through its placements, and the boxes it can be
+ * dropped into are `event_rows` for that scope. The event pages are therefore
+ * filters over one parties list and one rows list, not separate copies.
  *
  * Guild League carries a second level: the game fixes how many players each
  * division holds (ลีคหลัก 60, ลีครอง 90), so a division's capacity is a limit we
@@ -65,7 +71,11 @@ export function EventBoard({ category }: { category: EventCategoryId }) {
   const meta = getEventCategory(category)
 
   const [parties, setParties] = React.useState<Party[]>([])
+  const [eventRows, setEventRows] = React.useState<EventRow[]>([])
   const [members, setMembers] = React.useState<MemberStatus[]>([])
+  // The guild-local day the statuses belong to, as the API reported it. Shown in
+  // the check-in dialog so nobody reports the wrong day by accident.
+  const [date, setDate] = React.useState<string | undefined>(undefined)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
 
@@ -80,10 +90,19 @@ export function EventBoard({ category }: { category: EventCategoryId }) {
 
   const { authed, ready } = useAdminSession()
 
+  /**
+   * The parties snapshot version this page last saw. Every writer on the page —
+   * the board's and the party dialog's — shares this one ref, so a write from
+   * either keeps the other in step and none of them overwrites a newer save from
+   * another tab. A ref, not state: a queued write must send what the previous
+   * write in the queue produced, not the value from the render that queued it.
+   */
+  const partyVersion = React.useRef<number | null>(null)
+
   // One writer for the whole page: dropping a team into another lane saves on
   // the spot, and the tab editor saves on a button — same route, same PIN.
   // Declared with the other hooks because the early return below is conditional.
-  const writer = usePartyWriter(setParties)
+  const writer = usePartyWriter(setParties, partyVersion)
 
   React.useEffect(() => {
     let cancelled = false
@@ -94,18 +113,30 @@ export function EventBoard({ category }: { category: EventCategoryId }) {
       fetch("/api/parties", { cache: "no-store" }).then(async (res) => {
         const body = await res.json()
         if (!res.ok) throw new Error(body.error ?? "โหลดปาร์ตี้ไม่สำเร็จ")
-        return Array.isArray(body.parties) ? (body.parties as Party[]) : []
+        return {
+          parties: Array.isArray(body.parties) ? (body.parties as Party[]) : [],
+          eventRows: Array.isArray(body.eventRows)
+            ? (body.eventRows as EventRow[])
+            : [],
+          version: typeof body.version === "number" ? body.version : 0,
+        }
       }),
       fetch("/api/attendance", { cache: "no-store" }).then(async (res) => {
         const body = (await res.json()) as RosterResponse
-        if (!res.ok) return []
-        return Array.isArray(body.roster) ? body.roster : []
+        if (!res.ok) return { roster: [], date: undefined }
+        return {
+          roster: Array.isArray(body.roster) ? body.roster : [],
+          date: body.date,
+        }
       }),
     ])
-      .then(([loadedParties, loadedMembers]) => {
+      .then(([loaded, attendance]) => {
         if (cancelled) return
-        setParties(loadedParties)
-        setMembers(loadedMembers)
+        setParties(loaded.parties)
+        setEventRows(loaded.eventRows)
+        partyVersion.current = loaded.version
+        setMembers(attendance.roster)
+        setDate(attendance.date)
         setError(null)
       })
       .catch((cause: Error) => {
@@ -120,6 +151,30 @@ export function EventBoard({ category }: { category: EventCategoryId }) {
     }
   }, [])
 
+  /**
+   * Re-reads today's statuses after someone checks in from this page.
+   *
+   * The board draws every member's badge and the "มาวันนี้" counts from this
+   * list, so a write that is not followed by a read leaves the person staring at
+   * their own old status right after the toast said it was saved. Only the
+   * roster is refetched: the teams did not change.
+   *
+   * A failed refresh is swallowed on purpose — the status *was* written, and
+   * blanking the board over a flaky second request would look like the write
+   * failed. The member can pull to refresh; the home page shows the same data.
+   */
+  const refreshRoster = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/attendance", { cache: "no-store" })
+      const body = (await res.json()) as RosterResponse
+      if (!res.ok || !Array.isArray(body.roster)) return
+      setMembers(body.roster)
+      setDate(body.date)
+    } catch {
+      // See above: the board stays on the last good copy.
+    }
+  }, [])
+
   // All hooks are above, so this early return is safe.
   if (!meta) return null
 
@@ -128,15 +183,13 @@ export function EventBoard({ category }: { category: EventCategoryId }) {
   // two league tabs from handing the same player to both teams.
   const leagueTeams = partiesForEvent(parties, category)
 
-  const setDraft = (key: string, next: Party[]) =>
-    setDrafts((current) => ({ ...current, [key]: next }))
-
   const scope = (key: string, teams: Party[]) => (
     <EventScope
       meta={meta}
       division={divisions.length > 0 ? getDivision(category, key as LeagueDivisionId) : undefined}
       teams={teams}
       all={parties}
+      eventRows={eventRows}
       leagueTeams={leagueTeams}
       members={members}
       loading={loading}
@@ -144,9 +197,12 @@ export function EventBoard({ category }: { category: EventCategoryId }) {
       canEdit={ready && authed}
       writer={writer}
       query={query}
-      onChange={(next) => setDraft(key, next)}
+      date={date}
+      versionRef={partyVersion}
+      onStatusSaved={refreshRoster}
       onResetDrafts={() => setDrafts({})}
       onReplaceAll={setParties}
+      onEventRowsChange={setEventRows}
     />
   )
 
@@ -305,6 +361,7 @@ function EventScope({
   division,
   teams,
   all,
+  eventRows,
   leagueTeams,
   members,
   loading,
@@ -312,14 +369,19 @@ function EventScope({
   canEdit,
   writer,
   query,
-  onChange,
+  date,
+  versionRef,
+  onStatusSaved,
   onReplaceAll,
   onResetDrafts,
+  onEventRowsChange,
 }: {
   meta: EventCategory
   division: LeagueDivision | undefined
   teams: Party[]
   all: Party[]
+  /** The boxes/rows of every scope, from the rows table. */
+  eventRows: EventRow[]
   /** Every team of the event, used to spot players already placed elsewhere. */
   leagueTeams: Party[]
   members: MemberStatus[]
@@ -329,7 +391,16 @@ function EventScope({
   writer: PartyWriter
   /** What the member typed into "ค้นหาชื่อของฉัน". */
   query: string
-  onChange: (next: Party[]) => void
+  /** Guild-local day the check-in dialog reports for. */
+  date?: string
+  /**
+   * Shared optimistic-lock token. The board's writer owns it; the party dialog
+   * writes through the same ref so the two writers never knock each other into
+   * a false 409.
+   */
+  versionRef: React.RefObject<number | null>
+  /** Re-reads today's statuses after a member checks in from a card. */
+  onStatusSaved: () => void
   /**
    * Replaces the whole parties tab on this page. The party dialog edits every
    * party at once, so its result cannot be folded into one scope's draft.
@@ -342,34 +413,55 @@ function EventScope({
    * just wrote.
    */
   onResetDrafts: () => void
+  /** Replaces the whole rows list after a box add/rename/delete/reorder. */
+  onEventRowsChange: (next: EventRow[]) => void
 }) {
   const byName = new Map(members.map((member) => [member.name, member]))
   const { confirm, dialog: confirmDialog } = useConfirm()
 
   /*
-    Boxes the guild master just added but that no team carries yet.
-
-    Nothing stores the list of Guild War boxes — a box exists only as a suffix on
-    its teams' `content` — so a brand-new empty box has nowhere to live but this
-    component. Once a team is dragged in, the write below puts the name on the
-    team and `rowsForScope` returns the box itself; the local copy is then
-    deduped by id and stops mattering. Deleting the box drops it either way.
+    Who is checking in, if anyone. A name rather than the member object so the
+    dialog always reads the freshly refetched roster (the write replaces every
+    `MemberStatus`), and so closing the dialog is one assignment.
   */
-  const [extraBoxes, setExtraBoxes] = React.useState<LeagueLane[]>([])
+  const [checkInName, setCheckInName] = React.useState<string | null>(null)
+  const checkInMember = checkInName ? byName.get(checkInName) ?? null : null
+
+  /*
+    A player dropped onto another player's row. The board only knows the two
+    seats; this page asks whether that means "swap" or "add to this team".
+  */
+  const [memberDrop, setMemberDrop] = React.useState<MemberDropRequest | null>(
+    null
+  )
 
   /**
-   * Writes this scope's optimistic change and rolls it back if the database says no.
+   * Writes the whole tab and, when the edit touched boxes, the whole rows list.
    *
-   * `previous` is what the scope held before the edit. Only the newest edit may
-   * roll back: writes queue, so an older one can fail after a newer one has
-   * already put a different list on screen, and reverting then would show a
-   * state that no successful write ever produced.
+   * Both are replaced rather than diffed, so a failed write must put both back.
+   * Only the newest edit may roll back: writes queue, so an older failure can
+   * land after a newer edit is already on screen.
    */
   const writeSeq = React.useRef(0)
-  const commit = async (merged: Party[], successText: string, previous: Party[]) => {
+  const save = async (
+    next: Party[],
+    successText: string,
+    rows?: EventRow[]
+  ): Promise<boolean> => {
+    const previousParties = all
+    const previousRows = eventRows
     const ticket = (writeSeq.current += 1)
-    const ok = await writer.write(merged, successText)
-    if (!ok && writeSeq.current === ticket) onChange(previous)
+
+    onReplaceAll(next)
+    onResetDrafts()
+    if (rows) onEventRowsChange(rows)
+
+    const ok = await writer.write(next, successText, rows)
+    if (!ok && writeSeq.current === ticket) {
+      onReplaceAll(previousParties)
+      if (rows) onEventRowsChange(previousRows)
+      onResetDrafts()
+    }
     return ok
   }
 
@@ -386,218 +478,284 @@ function EventScope({
   const unassigned = division ? Math.max(0, rosterSize - inEvent.size) : rosterSize - inThisScope.size
   const over = division ? Math.max(0, headcount - division.capacity) : 0
   const searching = query.trim().length > 0
+  /*
+    Team order is per event: the board reads each placement's `position` for
+    this scope. The parties list still supplies the fallback order for rows
+    written before per-scope positions existed.
+  */
+  const orderedTeams = React.useMemo(
+    () => sortTeamsForScope(teams, meta.id),
+    [teams, meta.id]
+  )
   // Only the cards shrink; every number above stays about the whole division,
   // because a member searching for their name is still asking how big it is.
-  const visibleTeams = filterTeamsByQuery(teams, query)
+  const visibleTeams = filterTeamsByQuery(orderedTeams, query)
 
   /*
-    The rows of this scope: a division's lanes are fixed by the game, while
-    Guild War's boxes are whatever the teams currently say — see
-    `rowsForScope`. An event with neither (nothing matched, or a category
-    without rows) falls through to the plain grid below.
-
-    `rowsForScope` already ends with the parking row ("ว่าง"); brand-new boxes
-    that no team carries yet are slotted in just above it, so a box the guild
-    master just added always lands among the named boxes, not under the parking.
+    The rows of this scope come straight from `event_rows`, including boxes that
+    have no team in them. `rowsForScope` appends the virtual parking row ("ว่าง")
+    last; it is a drop target, never a stored row.
   */
-  const derivedRows = !division && Boolean(meta.derivedRows)
-  const baseRows: LeagueLane[] = division
-    ? [...(division.lanes ?? [])]
-    : rowsForScope(teams, meta.id, null)
-  const lanes: LeagueLane[] = derivedRows ? withExtraBoxes(baseRows, extraBoxes) : baseRows
+  const lanes: LeagueLane[] = rowsForScope(
+    eventRows,
+    meta.id,
+    division?.id ?? null
+  )
   /** The named boxes only — "ว่าง" is a parking spot, never reordered. */
-  const namedRows = lanes.filter((row) => row.suffix !== "")
-  const laneTeams: TeamInLane[] =
-    lanes.length
-      ? filterTeamsByQuery(teams, query).map((team) => ({
-          ...team,
-          lane: matchRow(team.content, meta.id, division?.id ?? null) ?? "",
-        }))
-      : []
+  const namedRows = lanes.filter((row) => row.id !== UNASSIGNED_ROW.id)
+  const laneTeams: TeamInLane[] = visibleTeams.map((team) => ({
+    ...team,
+    lane: partyRowKey(team, meta.id),
+  }))
   const unparked = division
-    ? laneTeams.filter((team) => !hasExplicitLane(team.content, meta.id, division.id)).length
+    ? orderedTeams.filter((team) => partyRowId(team, meta.id) === null).length
     : 0
 
-  /** Swaps this scope's teams inside the whole parties tab. */
-  const merge = (next: Party[]) =>
-    division
-      ? replaceDivisionParties(all, meta.id, division.id, next)
-      : replaceEventParties(all, meta.id, next)
-
   /**
-   * Dropping a card saves straight away, so the board has to move first and
-   * then tell the truth: the draft shows the new row while the database write is
-   * still in flight, and goes back where it was if the write fails.
+   * Dropping a card changes only this event's placement. Other events and the
+   * roster are untouched, so a shared team keeps its place on the other boards.
    */
   const moveTeamToRow = async (teamId: string, row: LeagueLane) => {
-    const team = teams.find((entry) => entry.id === teamId)
+    const team = all.find((entry) => entry.id === teamId)
     if (!team) return
 
-    const next = teams.map((entry) =>
+    const now = new Date().toISOString()
+    const next = all.map((entry) =>
       entry.id === teamId
         ? {
-            ...entry,
-            // Only *this* event's segment is rewritten: the label may also name
-            // other events, and a shared team must not drop off their pages.
-            // The label is derived from this scope, so a team can never end up
-            // with the other league's lane or another box's name.
-            content: setEventSegment(
-              entry.content,
+            ...setPartyPlacement(
+              entry,
               meta.id,
-              division ? laneContentLabel(division, row) : rowContentLabel(meta.id, row)
+              division?.id ?? "",
+              row.id === UNASSIGNED_ROW.id ? null : row.id
             ),
-            updatedAt: new Date().toISOString(),
+            updatedAt: now,
           }
         : entry
     )
-    onChange(next)
 
-    await commit(merge(next), `ย้าย ${team.name} ไป${row.label}แล้ว`, teams)
+    await save(next, `ย้าย ${team.name} ไป${row.label}แล้ว`)
   }
 
   /**
-   * Removes a Guild War box by taking the box name off its teams, not by
-   * deleting them.
+   * The teams of this scope in board order: one box after another, and within
+   * each box the order stored in `party_placements.position`.
    *
-   * Nothing stores the list of boxes, so a box exists exactly as long as a team
-   * carries its name — the only way to make it go is to rewrite those labels,
-   * which drops the teams into `UNASSIGNED_ROW`. Deleting them instead would
-   * throw away the rosters of every team that happened to be in the box, for a
-   * mistake that is one button press away.
+   * Reordering works on the whole scope rather than on one box's slice, because
+   * `position` is dense per event. Writing the flattened list keeps every other
+   * box's relative order while giving the moved card a new dense position.
+   */
+  const teamOrderForScope = (): Party[] => {
+    const byLane = new Map<string, Party[]>()
+    for (const team of orderedTeams) {
+      const lane = partyRowKey(team, meta.id)
+      const list = byLane.get(lane) ?? []
+      list.push(team)
+      byLane.set(lane, list)
+    }
+    return lanes.flatMap((lane) => byLane.get(lane.id) ?? [])
+  }
+
+  /**
+   * Saves a new per-event order. Only this event's placements move: the same
+   * team on another board, and the parties tab's own order, are untouched.
+   */
+  const applyTeamOrder = async (ordered: Party[], successText: string) => {
+    const order = new Map(ordered.map((team, index) => [team.id, index]))
+    const now = new Date().toISOString()
+    const next = all.map((party) => {
+      const position = order.get(party.id)
+      if (position === undefined) return party
+      return {
+        ...party,
+        placements: party.placements.map((placement) =>
+          placement.event === meta.id ? { ...placement, position } : placement
+        ),
+        updatedAt: now,
+      }
+    })
+    await save(next, successText)
+  }
+
+  /** The keyboard path: swap a card with its neighbour inside the same box. */
+  const moveTeamInRow = (teamId: string, delta: -1 | 1) => {
+    const ordered = teamOrderForScope()
+    const team = ordered.find((entry) => entry.id === teamId)
+    if (!team) return
+
+    const lane = partyRowKey(team, meta.id)
+    const inRow = ordered.filter((entry) => partyRowKey(entry, meta.id) === lane)
+    const at = inRow.findIndex((entry) => entry.id === teamId)
+    const target = inRow[at + delta]
+    if (!target) return
+
+    const from = ordered.findIndex((entry) => entry.id === teamId)
+    const to = ordered.findIndex((entry) => entry.id === target.id)
+    ;[ordered[from], ordered[to]] = [ordered[to], ordered[from]]
+    void applyTeamOrder(
+      ordered,
+      `เลื่อน ${target.name} ${delta < 0 ? "ขึ้น" : "ลง"} แล้ว`
+    )
+  }
+
+  /** The drag path: put one card where another card sits in the same box. */
+  const reorderTeam = async (fromId: string, toId: string) => {
+    const ordered = teamOrderForScope()
+    const from = ordered.findIndex((entry) => entry.id === fromId)
+    const to = ordered.findIndex((entry) => entry.id === toId)
+    if (from < 0 || to < 0 || from === to) return
+
+    const [moved] = ordered.splice(from, 1)
+    if (!moved) return
+    ordered.splice(to, 0, moved)
+    await applyTeamOrder(ordered, `สลับลำดับ ${moved.name} แล้ว`)
+  }
+
+  /**
+   * Deletes a box, not the teams inside it.
+   *
+   * The teams lose the row id and appear in "ว่าง"; their rosters, names and
+   * other events stay exactly as they were. An empty box is deleted without a
+   * confirmation because there is nothing to lose.
    */
   const clearBox = async (row: LeagueLane) => {
-    // A box the guild master just added has no teams to relabel yet — dropping
-    // it from local state is the whole delete, and nothing is lost.
-    setExtraBoxes((current) => current.filter((box) => box.id !== row.id))
+    const inBox = teams.filter((team) => partyRowKey(team, meta.id) === row.id)
 
-    const inBox = teams.filter(
-      (team) => matchRow(team.content, meta.id, division?.id ?? null) === row.id
-    )
-    if (inBox.length === 0) return
-
-    const yes = await confirm({
-      title: `ลบกล่อง “${row.label}”?`,
-      description:
-        `ชื่อกล่องจะถูกถอดออกจากทีมในกล่องนี้ ${inBox.length} ทีม ` +
-        `ทีมทั้งหมดจะย้ายไปกล่อง “${UNASSIGNED_ROW.label}” คนในทีมไม่หาย`,
-      confirmLabel: "ถอดชื่อกล่อง",
-      tone: "danger",
-    })
-    if (!yes) return
+    if (inBox.length > 0) {
+      const yes = await confirm({
+        title: `ลบกล่อง “${row.label}”?`,
+        description:
+          `ทีมในกล่องนี้ ${inBox.length} ทีมจะย้ายไปกล่อง “${UNASSIGNED_ROW.label}” ` +
+          "คนในทีมไม่หาย",
+        confirmLabel: "ลบกล่อง",
+        tone: "danger",
+      })
+      if (!yes) return
+    }
 
     const now = new Date().toISOString()
-    const next = teams.map((team) =>
-      inBox.includes(team)
-        ? {
-            ...team,
-            content: setEventSegment(
-              team.content,
-              meta.id,
-              rowContentLabel(meta.id, UNASSIGNED_ROW)
-            ),
-            updatedAt: now,
-          }
-        : team
+    const next = all.map((party) => {
+      if (!party.placements.some((p) => p.event === meta.id && p.rowId === row.id)) {
+        return party
+      }
+      return {
+        ...party,
+        placements: party.placements.map((placement) =>
+          placement.event === meta.id && placement.rowId === row.id
+            ? { ...placement, rowId: null }
+            : placement
+        ),
+        updatedAt: now,
+      }
+    })
+
+    await save(
+      next,
+      `ลบกล่อง ${row.label} แล้ว`,
+      eventRows.filter((entry) => entry.id !== row.id)
     )
-    onChange(next)
-    await commit(merge(next), `ลบกล่อง ${row.label} แล้ว`, teams)
   }
 
   /**
-   * Adds an empty Guild War box so teams can be dragged into it.
-   *
-   * The box is only a drop target until a team lands in it: `moveTeamToRow`
-   * writes the name onto that team and the box becomes real on the database. A
-   * name that already exists is refused, so two rows never claim one box.
+   * Adds an empty box. It is stored immediately, so it survives a refresh and
+   * is visible from every device before a team has been dropped into it.
    */
   const addBox = (name: string) => {
-    const box = boxRow(name)
-    if (!box.id) {
+    const trimmed = name.trim()
+    if (!trimmed) {
       toast.error("ตั้งชื่อกล่องด้วยตัวอักษรหรือตัวเลขอย่างน้อย 1 ตัว")
       return
     }
-    if (lanes.some((row) => row.id === box.id)) {
-      toast.info(`มีกล่อง “${box.label}” อยู่แล้ว`)
+
+    const scope = division?.id ?? ""
+    const key = foldRowName(trimmed)
+    if (
+      eventRows.some(
+        (row) =>
+          row.event === meta.id &&
+          row.division === scope &&
+          foldRowName(row.name) === key
+      )
+    ) {
+      toast.info(`มีกล่อง “${trimmed}” อยู่แล้ว`)
       return
     }
-    setExtraBoxes((current) => [...current, box])
-    toast.success(`เพิ่มทีมใหญ่ “${box.label}” แล้ว — ลากทีมใส่ได้เลย`)
+
+    const rowsInScope = eventRows.filter(
+      (row) => row.event === meta.id && row.division === scope
+    )
+    const nextRows: EventRow[] = [
+      ...eventRows,
+      {
+        id: crypto.randomUUID(),
+        event: meta.id,
+        division: scope,
+        name: trimmed,
+        position: rowsInScope.length,
+      },
+    ]
+
+    void save(all, `เพิ่มกล่อง “${trimmed}” แล้ว — ลากทีมใส่ได้เลย`, nextRows)
   }
 
-  /**
-   * Renames a Guild War box by rewriting the label on the teams inside it.
-   *
-   * A box has no row of its own anywhere — it exists only as the suffix on its
-   * teams' `content` — so renaming one is the same write as moving a team: put
-   * the new box on every team that was in the old one. Team order is left
-   * alone, and `rowsForScope` derives boxes in first-appearance order, so the
-   * box keeps its place in the list and nobody changes box on the way.
-   */
+  /** A box rename is one row update; no team or placement is touched. */
   const renameBox = async (row: LeagueLane, nextName: string) => {
-    const next = boxRow(nextName)
-    if (!next.id) {
+    const trimmed = nextName.trim()
+    if (!trimmed) {
       toast.error("ตั้งชื่อกล่องด้วยตัวอักษรหรือตัวเลขอย่างน้อย 1 ตัว")
       return
     }
-    if (next.id === row.id) return
-    if (next.id === UNASSIGNED_ROW.id || lanes.some((entry) => entry.id === next.id)) {
-      toast.info(`มีกล่อง “${next.label}” อยู่แล้ว`)
+    if (trimmed === row.label) return
+
+    const scope = division?.id ?? ""
+    const key = foldRowName(trimmed)
+    if (
+      eventRows.some(
+        (entry) =>
+          entry.id !== row.id &&
+          entry.event === meta.id &&
+          entry.division === scope &&
+          foldRowName(entry.name) === key
+      )
+    ) {
+      toast.info(`มีกล่อง “${trimmed}” อยู่แล้ว`)
       return
     }
 
-    // A box that is still empty lives only in local state — renaming it is
-    // local too, nothing to write.
-    setExtraBoxes((current) => current.map((box) => (box.id === row.id ? next : box)))
-
-    const inBox = teams.filter(
-      (team) => matchRow(team.content, meta.id, division?.id ?? null) === row.id
+    const nextRows = eventRows.map((entry) =>
+      entry.id === row.id ? { ...entry, name: trimmed } : entry
     )
-    if (inBox.length === 0) {
-      toast.success(`เปลี่ยนชื่อกล่องเป็น ${next.label} แล้ว`)
-      return
-    }
-
-    const now = new Date().toISOString()
-    const relabelled = teams.map((team) =>
-      inBox.includes(team)
-        ? {
-            ...team,
-            content: setEventSegment(team.content, meta.id, rowContentLabel(meta.id, next)),
-            updatedAt: now,
-          }
-        : team
-    )
-    onChange(relabelled)
-    await commit(merge(relabelled), `เปลี่ยนชื่อกล่องเป็น ${next.label} แล้ว`, teams)
+    await save(all, `เปลี่ยนชื่อกล่องเป็น ${trimmed} แล้ว`, nextRows)
   }
 
   /**
-   * Renames one team (ทีมย่อย), and relabels it if the dialog changed the label.
+   * Renames one team and replaces its event placements.
    *
-   * The members, the id and — unless the label itself changes — the box stay
-   * where they are, so nothing shifts on the board beyond the edit. The label is
-   * the one field that can move a team off this page: unticking this event sends
-   * it to the "ว่าง" row of every page, ticking another one adds it there. The
-   * write goes out as the whole parties tab either way (`merge`), so a team that
-   * just changed division is in the list once, under the division it now names.
+   * The dialog may remove the event this board is showing, or switch a league
+   * division. The whole parties tab is written, so the team lands exactly once
+   * on the board it now names.
    */
-  const renameTeam = async (teamId: string, nextName: string, nextContent: string) => {
-    const team = teams.find((entry) => entry.id === teamId)
+  const renameTeam = async (
+    teamId: string,
+    nextName: string,
+    nextPlacements: PartyPlacement[]
+  ) => {
+    const team = all.find((entry) => entry.id === teamId)
     if (!team) return
     const trimmed = nextName.trim()
-    const labelled = stripCustomLabels(nextContent)
     if (!trimmed) return
-    if (trimmed === team.name && labelled === team.content) return
 
     const now = new Date().toISOString()
-    const next = teams.map((entry) =>
-      entry.id === teamId ? { ...entry, name: trimmed, content: labelled, updatedAt: now } : entry
+    const next = all.map((entry) =>
+      entry.id === teamId
+        ? { ...entry, name: trimmed, placements: nextPlacements, updatedAt: now }
+        : entry
     )
-    onChange(next)
-    await commit(
-      merge(next),
-      trimmed === team.name ? "เปลี่ยนป้ายทีมแล้ว" : `เปลี่ยนชื่อทีมเป็น ${trimmed} แล้ว`,
-      teams
+    await save(
+      next,
+      trimmed === team.name
+        ? "เปลี่ยนป้ายทีมแล้ว"
+        : `เปลี่ยนชื่อทีมเป็น ${trimmed} แล้ว`
     )
   }
 
@@ -621,6 +779,7 @@ function EventScope({
     )
     const ok = await writer.write(nextAll, successText)
     if (ok) onResetDrafts()
+    return ok
   }
 
   /**
@@ -683,27 +842,111 @@ function EventScope({
   }
 
   /**
-   * Saves a new order for the named boxes.
+   * The "เพิ่มเข้าทีม" half of a player-on-player drop.
    *
-   * There is nowhere to store a box order — a box is only a label on its teams
-   * — so the one way to say "ทีมใหญ่ 2 มาก่อน ทีมใหญ่ 1" is to reorder the teams
-   * themselves and write the tab back. Grouping them into the new order is what
-   * makes `rowsForScope` derive the boxes that way on the next load.
+   * The dialog already confirmed it, so this writes straight away instead of
+   * asking a second time. The dragged name is still taken off any other team of
+   * the event, because a player sits on one team and a drop is a move.
+   */
+  const applyMemberAdd = async (teamId: string, name: string) => {
+    const target = all.find((entry) => entry.id === teamId)
+    if (!target || target.memberNames.includes(name)) return
+    if (target.memberNames.length >= TEAM_MAX_MEMBERS) {
+      toast.info(`${target.name} มีครบ ${TEAM_MAX_MEMBERS} คนแล้ว`)
+      return
+    }
+
+    const others = leagueTeams.filter(
+      (entry) => entry.id !== teamId && entry.memberNames.includes(name)
+    )
+    await writeMembers(
+      [
+        { ...target, memberNames: [...target.memberNames, name] },
+        ...others.map((entry) => ({
+          ...entry,
+          memberNames: entry.memberNames.filter((member) => member !== name),
+        })),
+      ],
+      `ย้าย ${name} มา ${target.name} แล้ว`
+    )
+  }
+
+  /**
+   * Swaps two players' seats on the same team — the board's reorder gesture.
+   *
+   * A name dropped onto another name *in the same card* changes the order the
+   * team lists them in; nothing leaves the team, so it needs no dialog. The
+   * array order is `party_members.slot`, and the cards always show that order,
+   * so the swap is visible as soon as the write lands.
+   */
+  const reorderMember = async (
+    teamId: string,
+    name: string,
+    targetName: string
+  ) => {
+    const team = all.find((entry) => entry.id === teamId)
+    if (!team) return
+    const memberNames = swapMemberSeats(team.memberNames, name, targetName)
+    // Identity means the helper refused: a stale name or a drop on itself.
+    if (memberNames === team.memberNames) return
+
+    await writeMembers(
+      [{ ...team, memberNames }],
+      `สลับลำดับ ${name} กับ ${targetName} ใน ${team.name} แล้ว`
+    )
+  }
+
+  /**
+   * The "สลับที่นั่ง" half: the two names exchange teams, and both teams keep
+   * their headcount. Both rows travel in the same PUT through `writeMembers`.
+   */
+  const applyMemberSwap = async (
+    fromTeamId: string,
+    name: string,
+    targetTeamId: string,
+    targetName: string
+  ) => {
+    const source = all.find((entry) => entry.id === fromTeamId)
+    const target = all.find((entry) => entry.id === targetTeamId)
+    if (!source || !target || source.id === target.id) return
+    if (
+      !source.memberNames.includes(name) ||
+      !target.memberNames.includes(targetName)
+    ) {
+      return
+    }
+
+    await writeMembers(
+      [
+        {
+          ...source,
+          memberNames: source.memberNames.map((member) =>
+            member === name ? targetName : member
+          ),
+        },
+        {
+          ...target,
+          memberNames: target.memberNames.map((member) =>
+            member === targetName ? name : member
+          ),
+        },
+      ],
+      `สลับ ${name} กับ ${targetName} แล้ว`
+    )
+  }
+
+  /**
+   * Saves a new order for the named boxes by updating their own positions.
+   *
+   * Team order is untouched: a box is a stored container now, not a side effect
+   * of which team happens to be listed first.
    */
   const applyRowOrder = async (reordered: LeagueLane[], successText: string) => {
-    const boxOf = (team: Party) => matchRow(team.content, meta.id, null)
-    const grouped = reordered.flatMap((row) => teams.filter((team) => boxOf(team) === row.id))
-    // Teams sitting in no named box (the parking row) keep their order at the end.
-    const rest = teams.filter((team) => !reordered.some((row) => row.id === boxOf(team)))
-    const next = [...grouped, ...rest]
-
-    // Empty boxes exist only in local state, so their order has to move here too.
-    setExtraBoxes((current) =>
-      reordered.filter((row) => current.some((box) => box.id === row.id))
+    const order = new Map(reordered.map((row, index) => [row.id, index]))
+    const nextRows = eventRows.map((row) =>
+      order.has(row.id) ? { ...row, position: order.get(row.id)! } : row
     )
-
-    onChange(next)
-    await commit(merge(next), successText, teams)
+    await save(all, successText, nextRows)
   }
 
   /** Drops box `fromId` where box `toId` sits — the drag path. */
@@ -762,8 +1005,15 @@ function EventScope({
             <EmptyTitle>ยังไม่มีทีม {division ? division.title : meta.title}</EmptyTitle>
             <EmptyDescription>
               {division
-                ? `ยังไม่มีทีมใน${division.title} — จัดทีมได้ที่แท็บ “ปาร์ตี้” ในหน้าผู้ดูแล โดยใส่ป้าย “${division.contentLabel}” ให้ทีม`
-                : `ยังไม่มีทีมของ ${meta.title} — จัดทีมได้ที่แท็บ “ปาร์ตี้” ในหน้าผู้ดูแล โดยใส่ “${meta.label}” ในช่องป้ายกำกับ`}
+                ? `ยังไม่มีทีมใน${division.title} — จัดทีมได้ที่แท็บ “ปาร์ตี้” ในหน้าผู้ดูแล โดยติ๊กชิป “${division.label}” ในป้ายกำกับ`
+                : `ยังไม่มีทีมของ ${meta.title} — จัดทีมได้ที่แท็บ “ปาร์ตี้” ในหน้าผู้ดูแล โดยติ๊กชิป “${meta.label}” ในป้ายกำกับ`}
+              {namedRows.length === 0 && (
+                <span className="mt-1 block">
+                  {canEdit
+                    ? "ลีกนี้ยังไม่มีกล่องเลย — กด “เพิ่มกล่อง” ด้านบนเพื่อสร้างกล่องแรก"
+                    : "ลีกนี้ยังไม่มีกล่อง — หัวหน้ากิลด์จะเพิ่มให้"}
+                </span>
+              )}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -805,14 +1055,19 @@ function EventScope({
           unparked={unparked}
           query={query}
           onMoveTeam={moveTeamToRow}
-          // Only Guild War: a league lane belongs to the game, not to the admin.
-          onReorderRow={derivedRows ? moveRowTo : undefined}
-          onMoveRow={derivedRows ? moveRowBy : undefined}
-          onRenameRow={derivedRows ? renameBox : undefined}
+          // Every row is the guild master's: league boxes are not game lanes.
+          onReorderRow={moveRowTo}
+          onMoveRow={moveRowBy}
+          onReorderTeam={reorderTeam}
+          onMoveTeamInRow={moveTeamInRow}
+          onRenameRow={renameBox}
           onRenameTeam={renameTeam}
           onRemoveMember={removeMember}
           onAddMember={addMember}
-          onDeleteRow={division ? undefined : clearBox}
+          onMemberDrop={setMemberDrop}
+          onReorderMember={reorderMember}
+          onDeleteRow={clearBox}
+          onCheckIn={setCheckInName}
         />
       )
     }
@@ -826,6 +1081,7 @@ function EventScope({
               teams={laneTeams.filter((team) => team.lane === lane.id)}
               byName={byName}
               query={query}
+              onCheckIn={setCheckInName}
             />
           ))}
         </div>
@@ -834,7 +1090,13 @@ function EventScope({
     return (
       <div className="grid gap-4 sm:grid-cols-2">
         {visibleTeams.map((team) => (
-          <TeamCard key={team.id} team={team} byName={byName} query={query} />
+          <TeamCard
+            key={team.id}
+            team={team}
+            byName={byName}
+            query={query}
+            onCheckIn={setCheckInName}
+          />
         ))}
       </div>
     )
@@ -863,6 +1125,11 @@ function EventScope({
           {filteredNote && (
             <p className="text-sm font-medium">{filteredNote}</p>
           )}
+          {members.length > 0 && teams.length > 0 && (
+            <p className="text-muted-foreground text-sm">
+              แตะชื่อของตัวเองบนการ์ดเพื่อแจ้ง “มา” หรือ “ลา” ของวันนี้
+            </p>
+          )}
         </div>
         <Badge variant="outline" className="shrink-0">
           อัปเดต {latestUpdate(teams)}
@@ -872,14 +1139,16 @@ function EventScope({
       {/*
         Admin controls, right above the board they act on. The party dialog is
         the only place teams are built now that the inline editor is gone, so it
-        is offered on every event page; "เพิ่มทีมใหญ่" is Guild War only,
-        because a league lane is the game's, not the guild master's.
+        is offered on every event page; "เพิ่มกล่อง" is offered on every page
+        too, because league boxes are the guild master's now, not the game's.
       */}
       {canEdit && (
         <div className="flex flex-wrap items-center gap-2">
           <PartyDialog
             members={members}
             parties={all}
+            eventRows={eventRows}
+            versionRef={versionRef}
             // The dialog rewrites the whole tab, so the page takes its result
             // and drops every scope's draft — a draft that still held the old
             // teams would otherwise shadow the fresh base.
@@ -888,21 +1157,19 @@ function EventScope({
               onResetDrafts()
             }}
           />
-          {derivedRows && (
-            <NameDialog
-              trigger={
-                <Button variant="outline" className="touch-manipulation">
-                  <Plus /> เพิ่มทีมใหญ่
-                </Button>
-              }
-              title="เพิ่มทีมใหญ่"
-              description="พิมพ์ชื่อทีมใหญ่ เช่น ทีมใหญ่ 1, ทีมห้องหิน แล้วลากทีมจากกล่อง “ว่าง” ใส่ได้เลย — กล่องจะถูกบันทึกก็ต่อเมื่อมีทีมอยู่ข้างใน"
-              fieldLabel="ชื่อทีมใหญ่"
-              placeholder="เช่น ทีมใหญ่ 1"
-              submitLabel="เพิ่มทีมใหญ่"
-              onSubmit={addBox}
-            />
-          )}
+          <NameDialog
+            trigger={
+              <Button variant="outline" className="touch-manipulation">
+                <Plus /> เพิ่มกล่อง
+              </Button>
+            }
+            title="เพิ่มกล่อง"
+            description="พิมพ์ชื่อกล่อง เช่น กล่อง A, ทีมห้องหิน แล้วลากทีมจากกล่อง “ว่าง” ใส่ได้เลย — กล่องว่างจะอยู่ต่อแม้ยังไม่มีทีม"
+            fieldLabel="ชื่อกล่อง"
+            placeholder="เช่น กล่อง A"
+            submitLabel="เพิ่มกล่อง"
+            onSubmit={addBox}
+          />
         </div>
       )}
 
@@ -914,6 +1181,43 @@ function EventScope({
       <MemberPlacementProvider parties={all}>{body}</MemberPlacementProvider>
 
       {canEdit && confirmDialog}
+
+      {canEdit && memberDrop && (
+        <MemberDropDialog
+          request={memberDrop}
+          parties={all}
+          onCancel={() => setMemberDrop(null)}
+          onSwap={() => {
+            const request = memberDrop
+            setMemberDrop(null)
+            void applyMemberSwap(
+              request.fromTeamId,
+              request.name,
+              request.targetTeamId,
+              request.targetName
+            )
+          }}
+          onAdd={() => {
+            const request = memberDrop
+            setMemberDrop(null)
+            void applyMemberAdd(request.targetTeamId, request.name)
+          }}
+        />
+      )}
+
+      {/*
+        Rendered only while a name is picked: mounting fresh per person means the
+        dialog's selected status starts from that member's status on record,
+        without an effect resetting state when the roster refetches.
+      */}
+      {checkInMember && (
+        <CheckInDialog
+          member={checkInMember}
+          date={date}
+          onClose={() => setCheckInName(null)}
+          onSaved={onStatusSaved}
+        />
+      )}
     </div>
   )
 }
@@ -923,11 +1227,13 @@ function LaneRowReadonly({
   teams,
   byName,
   query,
+  onCheckIn,
 }: {
   label: string
   teams: TeamInLane[]
   byName: Map<string, MemberStatus>
   query: string
+  onCheckIn?: (name: string) => void
 }) {
   const players = teams.reduce((total, team) => total + team.memberNames.length, 0)
   const searching = query.trim().length > 0
@@ -947,8 +1253,16 @@ function LaneRowReadonly({
       ) : (
         <div className="flex flex-wrap gap-2">
           {teams.map((team) => (
-            <div key={team.id} className="w-full max-w-56">
-              <TeamCard team={team} byName={byName} query={query} />
+            // Same width as the guild master's board: the two views are the
+            // same rows of teams, and a narrower card fit one extra per line
+            // (5 vs 4) while clipping long names the wider card holds.
+            <div key={team.id} className="w-full max-w-72">
+              <TeamCard
+                team={team}
+                byName={byName}
+                query={query}
+                onCheckIn={onCheckIn}
+              />
             </div>
           ))}
         </div>
@@ -974,22 +1288,6 @@ function latestUpdate(teams: Party[]): string {
   })
 }
 
-/**
- * Slots locally-added empty boxes in above the parking row.
- *
- * `rowsForScope` derives boxes from teams and puts "ว่าง" (empty suffix) last;
- * a box that was just added carries no team yet, so it is appended to this
- * component's `extraBoxes` and merged in here — before the parking row, never
- * after it. Deduped by id, so a box that has since gained a team (and is now
- * derived by `rowsForScope`) is not shown twice.
- */
-function withExtraBoxes(rows: LeagueLane[], extras: LeagueLane[]): LeagueLane[] {
-  const named = rows.filter((row) => row.suffix !== "")
-  const parking = rows.filter((row) => row.suffix === "")
-  const seen = new Set(named.map((row) => row.id))
-  return [...named, ...extras.filter((box) => !seen.has(box.id)), ...parking]
-}
-
 /* ----------------------------------------------------------------- admin */
 
 /**
@@ -1004,7 +1302,10 @@ function withExtraBoxes(rows: LeagueLane[], extras: LeagueLane[]): LeagueLane[] 
  * message pinned halfway up the editor is gone before they read it. A write
  * that failed has to survive a scroll.
  */
-function usePartyWriter(onSaved: (next: Party[]) => void) {
+function usePartyWriter(
+  onSaved: (next: Party[]) => void,
+  versionRef: React.RefObject<number | null>
+) {
   const [busy, setBusy] = React.useState(false)
 
   /**
@@ -1023,22 +1324,40 @@ function usePartyWriter(onSaved: (next: Party[]) => void) {
   /** Counts queued writes; only the newest one may clear `busy`. */
   const seq = React.useRef(0)
 
-  /** Resolves true when the database took it; false after showing the error. */
-  function write(merged: Party[], successText: string): Promise<boolean> {
+  /**
+   * Resolves true when the database took it; false after showing the error.
+   *
+   * `rows` is passed only by box edits. Member/team edits leave the rows table
+   * alone, so omitting it keeps those writes as small as they were.
+   */
+  function write(
+    merged: Party[],
+    successText: string,
+    rows?: EventRow[]
+  ): Promise<boolean> {
     setBusy(true)
     const ticket = (seq.current += 1)
 
     const result = queue.current.then(async () => {
       try {
+        const payload: Record<string, unknown> = { parties: merged }
+        if (rows) payload.eventRows = rows
+        // The token this tab read with the list. Left out while it is unknown
+        // (the first load failed), which falls back to a plain replace.
+        if (versionRef.current !== null) payload.version = versionRef.current
+
         const res = await fetch("/api/admin/parties", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           // No PIN in the body: the encrypted session cookie carries it, and the
           // route hands it to the script that re-checks it.
-          body: JSON.stringify({ parties: merged }),
+          body: JSON.stringify(payload),
         })
         const body = await res.json()
         if (!res.ok) throw new Error(body.error ?? "บันทึกไม่สำเร็จ")
+        // The next queued write must send the version this one produced, or it
+        // would 409 against a snapshot that is already on screen.
+        if (typeof body.version === "number") versionRef.current = body.version
 
         onSaved(merged)
         toast.success(successText)

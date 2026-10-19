@@ -21,7 +21,7 @@ import { toast } from "sonner"
 import { JOBS, isJobName } from "@/lib/rngw/jobs"
 import { filterMembers } from "@/lib/rngw/roster"
 import { ABSENCE_ALERT_AFTER, type Absences } from "@/lib/rngw/attendance"
-import type { AttendanceRow, Member } from "@/lib/rngw/types"
+import type { AttendanceRow, Member, Party } from "@/lib/rngw/types"
 import { cn } from "cn"
 
 const BLANK = {
@@ -35,6 +35,7 @@ export function MemberManager({
   members,
   absences,
   attendance,
+  parties,
   onSaved,
 }: {
   members: Member[]
@@ -42,6 +43,12 @@ export function MemberManager({
   absences?: Map<string, Absences>
   /** The raw ledger, only to report how many rows a delete will remove. */
   attendance?: AttendanceRow[]
+  /**
+   * Only to count how many teams a delete would take the member out of, so the
+   * confirm can name it. The teams themselves are edited in the parties tab,
+   * where the drag is.
+   */
+  parties?: Party[]
   onSaved: () => void
 }) {
   const [form, setForm] = React.useState(BLANK)
@@ -63,8 +70,19 @@ export function MemberManager({
     return counts
   }, [attendance])
 
-  function reset() {
-    setForm(BLANK)
+  // Teams per member, so a delete can say "and out of two teams" instead of
+  // the guild master learning about it from the board afterwards.
+  const partyTeams = React.useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const party of parties ?? []) {
+      for (const name of party.memberNames ?? []) {
+        counts.set(name, (counts.get(name) ?? 0) + 1)
+      }
+    }
+    return counts
+  }, [parties])
+
+  function reset() {    setForm(BLANK)
     setEditing(null)
   }
 
@@ -113,20 +131,24 @@ export function MemberManager({
   }
 
   /**
-   * Removes a member from the guild for good: the roster row and every
-   * attendance row in their name. There is no undo, so the confirm spells out
-   * the row count rather than asking "แน่ใจไหม".
+   * Removes a member from the guild for good: the roster row, every attendance
+   * row in their name, and every team they were standing in. There is no undo,
+   * so the confirm spells out the row count rather than asking "แน่ใจไหม".
    */
   async function remove(member: Member) {
     if (busy) return
 
     const history = historyCount.get(member.name) ?? 0
+    const teams = partyTeams.get(member.name) ?? 0
     const yes = await confirm({
       title: `ลบ ${member.name} ออกจากกิลด์?`,
-      description:
-        history > 0
-          ? `ลบแถวสมาชิกและประวัติเช็คชื่อ ${history} แถวถาวร — คืนไม่ได้ ไม่มีปุ่มย้อนกลับ`
-          : "ลบแถวสมาชิกถาวร — คืนไม่ได้ ไม่มีปุ่มย้อนกลับ (คนนี้ไม่มีประวัติเช็คชื่อ)",
+      description: [
+        history > 0 ? `ลบประวัติเช็คชื่อ ${history} แถว` : "คนนี้ไม่มีประวัติเช็คชื่อ",
+        teams > 0 ? `ถอดออกจากอีก ${teams} ทีม` : null,
+        "ถาวร — คืนไม่ได้ ไม่มีปุ่มย้อนกลับ",
+      ]
+        .filter(Boolean)
+        .join(" · "),
       confirmLabel: "ลบถาวร",
       tone: "danger",
     })
@@ -143,7 +165,12 @@ export function MemberManager({
       if (!res.ok) throw new Error(body.error ?? "ลบสมาชิกไม่สำเร็จ")
 
       toast.success(`ลบ ${member.name} ออกจากกิลด์แล้ว`, {
-        description: body.deleted > 0 ? `ลบประวัติเช็คชื่อ ${body.deleted} แถวด้วย` : undefined,
+        description: [
+          body.deleted > 0 ? `ลบประวัติเช็คชื่อ ${body.deleted} แถว` : null,
+          body.cleanedParties > 0 ? `ถอดออกจากอีก ${body.cleanedParties} ทีม` : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
       })
       if (editing === member.name) reset()
       onSaved()

@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { PartyLabelChips } from "@/components/party-label-chips"
-import { stripCustomLabels } from "@/lib/party"
+import type { PartyPlacement } from "@/lib/rngw/types"
 
 /**
  * Name + label, from the pencil on a team card.
@@ -29,35 +29,44 @@ import { stripCustomLabels } from "@/lib/party"
  * unchanged value, which is exactly right for a rename and wrong here — the
  * label alone is a complete edit while the name stays as it is.
  *
- * The label is stripped on the way in and out, so a party saved before the chips
- * existed cannot carry a tag that matches no page into a fresh edit.
+ * The placements are the source of truth: the chips add or remove one event
+ * each, and a removed event takes the team off that board without touching its
+ * roster.
  */
+function placementSignature(placements: PartyPlacement[]): string {
+  return placements
+    .map((placement) => `${placement.event}:${placement.division}`)
+    .sort()
+    .join("|")
+}
+
 export function TeamEditDialog({
   trigger,
   teamName,
-  initialContent,
+  initialPlacements,
   onSubmit,
 }: {
   trigger: React.ReactNode
   teamName: string
-  /** The team's label as stored, box name and all. */
-  initialContent: string | undefined
-  onSubmit: (values: { name: string; content: string }) => void
+  /** The events this team plays, with the division it names. */
+  initialPlacements: PartyPlacement[]
+  onSubmit: (values: { name: string; placements: PartyPlacement[] }) => void
 }) {
   const [open, setOpen] = React.useState(false)
   const [name, setName] = React.useState(teamName)
-  const [content, setContent] = React.useState(() => stripCustomLabels(initialContent))
+  const [placements, setPlacements] = React.useState(initialPlacements)
   const nameId = React.useId()
 
   const trimmed = name.trim()
-  const nextContent = stripCustomLabels(content)
   // Submitting the values already stored would rewrite the row for nothing.
-  const unchanged = trimmed === teamName && nextContent === stripCustomLabels(initialContent)
+  const unchanged =
+    trimmed === teamName &&
+    placementSignature(placements) === placementSignature(initialPlacements)
   const disabled = !trimmed || unchanged
 
   function submit() {
     if (disabled) return
-    onSubmit({ name: trimmed, content: nextContent })
+    onSubmit({ name: trimmed, placements })
     setOpen(false)
   }
 
@@ -69,7 +78,7 @@ export function TeamEditDialog({
         // not come back as the starting point.
         if (next) {
           setName(teamName)
-          setContent(stripCustomLabels(initialContent))
+          setPlacements(initialPlacements)
         }
         setOpen(next)
       }}
@@ -105,7 +114,7 @@ export function TeamEditDialog({
 
           <div className="space-y-1.5">
             <Label>ป้ายกำกับ</Label>
-            <PartyLabelChips content={content} onChange={setContent} />
+            <PartyLabelChips placements={placements} onChange={setPlacements} />
           </div>
         </div>
 

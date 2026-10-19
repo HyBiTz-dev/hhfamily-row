@@ -11,11 +11,9 @@ import "server-only";
  *   - `guild_admin_pin` the PIN itself, AES-256-GCM encrypted under
  *                       SESSION_SECRET.
  *
- * The PIN cookie used to have a job beyond the session: every destructive write
- * forwarded it to the Apps Script, which checked it again before touching the
- * spreadsheet. That check is gone — the database is only reachable with the
- * server's own token (see lib/db.ts), so `requireAdmin` on each route is now
- * the whole gate and there is no second endpoint out there to re-check against.
+ * The PIN is the only credential: there is no user table, and the database is
+ * reachable only with the server's own token (see lib/db.ts). `requireAdmin` on
+ * each route is therefore the whole gate.
  *
  * The PIN cookie stays anyway, because a session cookie pair that a member's
  * browser already holds should keep working across a deploy. `isAdmin` requires

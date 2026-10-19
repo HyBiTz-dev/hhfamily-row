@@ -1,10 +1,10 @@
 /**
  * Pure attendance logic — no I/O, so it stays testable.
  *
- * The `attendance` sheet is an append-only ledger. Google Sheets has no
- * read-modify-write primitive that is safe under concurrency, so we never
- * overwrite: every submission adds a row, and the newest row per member wins
- * when reading.
+ * The `attendance` table is an append-only ledger. We never overwrite a row:
+ * every submission adds one, and the newest row per member wins when reading.
+ * That is what keeps two members submitting at the same instant from
+ * clobbering each other.
  */
 
 import type { AttendanceRow, AttendanceStatus, Member, MemberStatus } from "./types";
@@ -93,8 +93,8 @@ export function guildDateLabel(
  *
  * The ledger stores epoch milliseconds, so the moment a member pressed the
  * button is recoverable — that is the whole point of the audit log. Rows with
- * no readable timestamp (the sheet handed back junk) show a dash rather than
- * an invented time.
+ * no readable timestamp (a bad write, or a row from before timestamps were
+ * stored) show a dash rather than an invented time.
  */
 export function guildTimeLabel(epoch: number, timeZone = "Asia/Bangkok"): string {
   if (!epoch) return "—";
@@ -106,8 +106,8 @@ export function guildTimeLabel(epoch: number, timeZone = "Asia/Bangkok"): string
 }
 
 /**
- * Newest row per member. Ties (same millisecond) are broken by keeping the
- * row that appears later in the sheet, which matches submit order.
+ * Newest row per member. Ties (same millisecond) are broken by the row with the
+ * higher `seq` — the read returns rows in submit order.
  */
 export function latestByMember(rows: AttendanceRow[]): Map<string, AttendanceRow> {
   const latest = new Map<string, AttendanceRow>();
@@ -212,7 +212,7 @@ export interface Absences {
   dates: string[];
   /**
    * First day they ever answered, which is where counting starts. A member
-   * added to the sheet last week must not be charged for the weeks before it.
+   * added to the roster last week must not be charged for the weeks before it.
    * `undefined` when they have never answered at all, in which case there is
    * nothing to judge them on — they are not counted as absent.
    */

@@ -29,8 +29,11 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { deleted } = await deleteMember(name.trim());
-    return Response.json({ ok: true, deleted });
+    // The whole summary, not just the row count: the caller names how many
+    // teams the name came out of as well, and the two callers of this route
+    // must not have to be told separately.
+    const summary = await deleteMember(name.trim());
+    return Response.json({ ok: true, ...summary });
   } catch (error) {
     return Response.json({ error: describe(error) }, { status: 502 });
   }

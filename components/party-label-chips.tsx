@@ -3,14 +3,14 @@
 import * as React from "react"
 import { Button } from "@/components/ui/button"
 import { activeLabelIds, partyLabelGroups, togglePartyLabel } from "@/lib/party"
+import type { PartyPlacement } from "@/lib/rngw/types"
 
 /**
  * The label editor: the chips, grouped by the page each group belongs to.
  *
  * This is the only way a party's label gets set. There is no text field beside
- * it, and `stripCustomLabels` drops whatever arrives that the chips could not
- * have written — a label that names no event puts the team in the "ว่าง" row of
- * every page, so a custom tag is a team nobody can find.
+ * it: a label that names no event puts the team in the "ว่าง" row of every
+ * page, so a custom tag is a team nobody can find.
  *
  * Grouping is not decoration: the two league chips are one event with two
  * divisions, and side by side they read as four events where there are three.
@@ -21,15 +21,15 @@ import { activeLabelIds, partyLabelGroups, togglePartyLabel } from "@/lib/party"
  * write the same vocabulary.
  */
 export function PartyLabelChips({
-  content,
+  placements,
   onChange,
 }: {
-  /** The label being edited. */
-  content: string
-  onChange: (next: string) => void
+  /** The event placements being edited. */
+  placements: PartyPlacement[]
+  onChange: (next: PartyPlacement[]) => void
 }) {
   const groups = React.useMemo(() => partyLabelGroups(), [])
-  const activeIds = activeLabelIds(content)
+  const activeIds = activeLabelIds(placements)
 
   return (
     <div className="space-y-2">
@@ -49,7 +49,7 @@ export function PartyLabelChips({
               // Multi-select: a fixed team can play several events, so a tap
               // toggles this event's segment and leaves the others — including
               // a Guild War box — exactly where they were.
-              onClick={() => onChange(togglePartyLabel(content, option))}
+              onClick={() => onChange(togglePartyLabel(placements, option))}
             >
               {option.label}
             </Button>

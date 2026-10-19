@@ -47,7 +47,7 @@ export async function POST(request: Request) {
 
   try {
     // No PIN: members report their own status without authenticating. The
-    // sheet can only gain a status row from this, and the newest row per
+    // ledger can only gain a status row from this, and the newest row per
     // member wins, so a bad-faith submission is overcorrectable.
     await appendAttendance({
       name: name.trim(),

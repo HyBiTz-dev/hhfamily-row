@@ -18,7 +18,7 @@ import {
 import { useConfirm } from "@/components/confirm-dialog"
 import { GameIcon } from "@/components/game-icon"
 import { ABSENCE_ALERT_AFTER, guildDayLabel, pastAlertLine, type Absences } from "@/lib/rngw/attendance"
-import type { AttendanceRow, Member } from "@/lib/rngw/types"
+import type { AttendanceRow, Member, Party } from "@/lib/rngw/types"
 import { cn } from "cn"
 import { toast } from "sonner"
 
@@ -44,6 +44,7 @@ export function AbsenceWarnings({
   members,
   absences,
   attendance,
+  parties,
   onSaved,
 }: {
   members: Member[]
@@ -51,6 +52,11 @@ export function AbsenceWarnings({
   absences: Map<string, Absences>
   /** The raw ledger, only to report how many rows a delete will remove. */
   attendance?: AttendanceRow[]
+  /**
+   * Only to count how many teams a delete would take the member out of, so the
+   * confirm can name it. The teams themselves are edited in the parties tab.
+   */
+  parties?: Party[]
   /** Called after a delete so the panel refetches the database. */
   onSaved: () => void
 }) {
@@ -68,8 +74,19 @@ export function AbsenceWarnings({
     [absences]
   )
 
-  const overLine = React.useMemo(
-    () => warned.filter(([, info]) => pastAlertLine(info)),
+  // Teams per member, for the same reason as in the member tab: a delete says
+  // "and out of two teams" rather than the guild master finding out later.
+  const partyTeams = React.useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const party of parties ?? []) {
+      for (const name of party.memberNames ?? []) {
+        counts.set(name, (counts.get(name) ?? 0) + 1)
+      }
+    }
+    return counts
+  }, [parties])
+
+  const overLine = React.useMemo(    () => warned.filter(([, info]) => pastAlertLine(info)),
     [warned]
   )
 
@@ -104,20 +121,25 @@ export function AbsenceWarnings({
   }, [attendance])
 
   /**
-   * Removes a member for good: the roster row and every attendance row in their
-   * name. The same call the member tab makes — one route, one behaviour, and no
-   * way to make someone disappear by pressing a different button.
+   * Removes a member for good: the roster row, every attendance row in their
+   * name, and every team they were standing in. The same call the member tab
+   * makes — one route, one behaviour, and no way to make someone disappear by
+   * pressing a different button.
    */
   async function remove(name: string) {
     if (busy) return
 
     const history = historyCount.get(name) ?? 0
+    const teams = partyTeams.get(name) ?? 0
     const yes = await confirm({
       title: `ลบ ${name} ออกจากกิลด์?`,
-      description:
-        history > 0
-          ? `ลบแถวสมาชิกและประวัติเช็คชื่อ ${history} แถวถาวร — คืนไม่ได้ ไม่มีปุ่มย้อนกลับ`
-          : "ลบแถวสมาชิกถาวร — คืนไม่ได้ ไม่มีปุ่มย้อนกลับ (คนนี้ไม่มีประวัติเช็คชื่อ)",
+      description: [
+        history > 0 ? `ลบประวัติเช็คชื่อ ${history} แถว` : "คนนี้ไม่มีประวัติเช็คชื่อ",
+        teams > 0 ? `ถอดออกจากอีก ${teams} ทีม` : null,
+        "ถาวร — คืนไม่ได้ ไม่มีปุ่มย้อนกลับ",
+      ]
+        .filter(Boolean)
+        .join(" · "),
       confirmLabel: "ลบถาวร",
       tone: "danger",
     })
@@ -134,7 +156,13 @@ export function AbsenceWarnings({
       if (!res.ok) throw new Error(body.error ?? "ลบสมาชิกไม่สำเร็จ")
 
       toast.success(`ลบ ${name} ออกจากกิลด์แล้ว`, {
-        description: body.deleted > 0 ? `ลบประวัติเช็คชื่อ ${body.deleted} แถวด้วย` : undefined,
+        description:
+          [
+            body.deleted > 0 ? `ลบประวัติเช็คชื่อ ${body.deleted} แถว` : null,
+            body.cleanedParties > 0 ? `ถอดออกจากอีก ${body.cleanedParties} ทีม` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ") || undefined,
       })
       onSaved()
     } catch (cause) {

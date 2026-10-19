@@ -20,6 +20,9 @@
 # production
 /build
 
+# database dumps from scripts/turso-backup.mjs — contain the whole roster
+/backups
+
 # misc
 .DS_Store
 *.pem

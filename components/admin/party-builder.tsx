@@ -11,10 +11,13 @@ import {
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core"
 import {
+  ChevronDown,
+  ChevronUp,
   Lock,
   LockOpen,
   MoveHorizontal,
@@ -48,6 +51,10 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AddMemberCombobox } from "@/components/events/add-member-combobox"
+import {
+  MemberDropDialog,
+  type MemberDropRequest,
+} from "@/components/events/member-drop-dialog"
 import { DragSafe } from "@/components/drag-safe"
 import { MemberPlacementProvider } from "@/components/member-placement"
 import { GameIcon } from "@/components/game-icon"
@@ -59,13 +66,18 @@ import {
   MIN_RANDOM_TEAM_SIZE,
   planRandomParties,
   RANDOM_FILL_COUNT,
-  stripCustomLabels,
+  swapMemberSeats,
   TEAM_MAX_MEMBERS,
   unlockedParties,
 } from "@/lib/party"
 import { PartyLabelChips } from "@/components/party-label-chips"
-import { matchEventCategories } from "@/lib/rngw/categories"
-import type { MemberStatus, Party } from "@/lib/rngw/types"
+import { derivePartyContent, partyEvents } from "@/lib/rngw/categories"
+import type {
+  EventRow,
+  MemberStatus,
+  Party,
+  PartyPlacement,
+} from "@/lib/rngw/types"
 import { cn } from "cn"
 import { toast } from "sonner"
 
@@ -95,16 +107,40 @@ import { toast } from "sonner"
 export function PartyBuilder({
   members,
   parties,
+  eventRows,
+  versionRef,
   onChange,
 }: {
   members: MemberStatus[]
   /** The parties tab as it is on the database — and what every write replaces. */
   parties: Party[]
+  /** Box names, so a card can show the label derived from its placements. */
+  eventRows: EventRow[]
+  /**
+   * The page's optimistic-lock token, shared with every other writer on the
+   * page (the board's writer in the event dialog). Read before a write and kept
+   * current from the response so the next edit does not 409 on its own save;
+   * omit-and-replace only when it is still unknown.
+   */
+  versionRef: React.RefObject<number | null>
   /** Called with the new full tab for the optimistic update (and revert). */
   onChange: (next: Party[]) => void
 }) {
   const [busy, setBusy] = React.useState(false)
   const [dragging, setDragging] = React.useState<MemberStatus | null>(null)
+  /**
+   * A name was dropped on a party that already has five people. The prompt
+   * picks who makes way — there is no "add" while it is full, so refusing
+   * outright (what used to happen) left the guild master to remove someone by
+   * hand and then repeat the drag.
+   */
+  const [swapRequest, setSwapRequest] = React.useState<SwapRequest | null>(null)
+  /**
+   * A name was dropped onto another name. Unlike a card drop, the target row
+   * can mean either "swap these two" or "put me on this team" — so the dialog
+   * offers both whenever the target party still has a free slot.
+   */
+  const [seatRequest, setSeatRequest] = React.useState<MemberDropRequest | null>(null)
   const { confirm, dialog: confirmDialog } = useConfirm()
 
   /** Serialises `put`, so writes reach the database in the order they were made. */
@@ -166,13 +202,21 @@ export function PartyBuilder({
     // the screen honest; it costs nothing but wall time.
     const result = queue.current.then(async () => {
       try {
+        const payload: Record<string, unknown> = { parties: next }
+        // The token this page read with the list. Left out while unknown, which
+        // falls back to a plain replace.
+        if (versionRef.current !== null) payload.version = versionRef.current
+
         const res = await fetch("/api/admin/parties", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ parties: next }),
+          body: JSON.stringify(payload),
         })
         const body = await res.json()
         if (!res.ok) throw new Error(body.error ?? "บันทึกไม่สำเร็จ")
+        // Keep the token current for the next queued write and for a remount
+        // after switching tabs, which would otherwise re-seed from a stale prop.
+        if (typeof body.version === "number") versionRef.current = body.version
         toast.success(success, { description: details, duration: details ? 8000 : undefined })
         return true
       } catch (cause) {
@@ -197,7 +241,7 @@ export function PartyBuilder({
     const party: Party = {
       id: crypto.randomUUID(),
       name,
-      content: values.content.trim() || undefined,
+      placements: values.placements,
       memberNames: [],
       updatedAt: new Date().toISOString(),
     }
@@ -211,7 +255,7 @@ export function PartyBuilder({
         ? {
             ...current,
             name: values.name.trim() || current.name,
-            content: values.content.trim() || undefined,
+            placements: values.placements,
             updatedAt: now,
           }
         : current
@@ -258,6 +302,27 @@ export function PartyBuilder({
         current.id === party.id ? { ...current, locked, updatedAt: now } : current
       ),
       locked ? `ล็อค ${party.name} ไว้แล้ว` : `ปลดล็อค ${party.name} แล้ว`
+    )
+  }
+
+  /**
+   * Moves one card up or down in the tab.
+   *
+   * `parties.position` is written as the array index (`partyStatements`), so
+   * reordering the array here *is* saving the order — there is no separate
+   * position field on the client copy. The buttons are the no-drag path; a
+   * keyboard user can arrange the whole tab without picking a card up.
+   */
+  function moveParty(partyId: string, delta: -1 | 1) {
+    const from = parties.findIndex((party) => party.id === partyId)
+    const to = from + delta
+    if (from < 0 || to < 0 || to >= parties.length) return
+
+    const next = [...parties]
+    ;[next[from], next[to]] = [next[to], next[from]]
+    void put(
+      next,
+      `เลื่อน ${parties[from].name} ${delta < 0 ? "ขึ้น" : "ลง"} แล้ว`
     )
   }
 
@@ -318,11 +383,13 @@ export function PartyBuilder({
     const target = parties.find((party) => party.id === partyId)
     if (!target || target.memberNames.includes(name)) return
     if (target.memberNames.length >= TEAM_MAX_MEMBERS) {
-      toast.info(`${target.name} มีครบ ${TEAM_MAX_MEMBERS} คนแล้ว — ต้องเอาออกก่อน`)
+      toast.info(
+        `${target.name} มีครบ ${TEAM_MAX_MEMBERS} คนแล้ว — ลากชื่อมาวางเพื่อสลับ หรือเอาออกก่อน`
+      )
       return
     }
 
-    const targetEvents = matchEventCategories(target.content)
+    const targetEvents = partyEvents(target)
     const source = fromPartyId
       ? parties.find((party) => party.id === fromPartyId && party.memberNames.includes(name))
       : undefined
@@ -333,7 +400,7 @@ export function PartyBuilder({
             party.id !== partyId &&
             party.memberNames.includes(name) &&
             targetEvents.length > 0 &&
-            matchEventCategories(party.content).some((event) => targetEvents.includes(event))
+            partyEvents(party).some((event) => targetEvents.includes(event))
         )
     if (others.length > 0) {
       const from = others.map((party) => party.name).join(", ")
@@ -368,6 +435,206 @@ export function PartyBuilder({
         ? `ย้าย ${name} มา ${target.name} แล้ว`
         : `เพิ่ม ${name} เข้า ${target.name} แล้ว`
     )
+  }
+
+  /**
+   * The drag-and-drop path, which is always a move and always confirmed.
+   *
+   * The confirm is the "add to party" button the drop needs: a drag can land on
+   * the wrong card, and a full card would silently refuse the drop. When the
+   * target is full the dialog becomes a swap prompt instead — `applyDrop` puts
+   * the outgoing member in the dragged name's old seat, so both cards keep
+   * their five slots.
+   */
+  async function requestDrop(partyId: string, name: string, fromPartyId: string | null) {
+    const target = parties.find((party) => party.id === partyId)
+    if (!target || target.memberNames.includes(name)) return
+
+    const source = fromPartyId
+      ? parties.find(
+          (party) => party.id === fromPartyId && party.memberNames.includes(name)
+        )
+      : undefined
+
+    if (target.memberNames.length >= TEAM_MAX_MEMBERS) {
+      setSwapRequest({ name, fromPartyId: source?.id ?? null, targetId: partyId })
+      return
+    }
+
+    const yes = await confirm({
+      title: source
+        ? `ย้าย ${name} มา “${target.name}”?`
+        : `เพิ่ม ${name} เข้า “${target.name}”?`,
+      description: source
+        ? `${name} จะออกจาก “${source.name}” แล้วไปอยู่ ${target.name} ` +
+          `(${target.memberNames.length + 1}/${TEAM_MAX_MEMBERS} คน)`
+        : `${target.name} จะมีสมาชิก ${target.memberNames.length + 1}/${TEAM_MAX_MEMBERS} คน`,
+      confirmLabel: source ? "ย้ายเข้าปาร์ตี้" : "เพิ่มเข้าปาร์ตี้",
+      // Taking the name off another party removes them from that team, which is
+      // the same "removing something" the red button is for.
+      tone: source ? "danger" : "default",
+    })
+    if (!yes) return
+
+    applyDrop(target.id, name, source?.id ?? null)
+  }
+
+  /**
+   * Writes a move between two cards, optionally exchanging one of the target's
+   * members back into the source card.
+   *
+   * `swapOut` is what keeps a full target full: the outgoing member takes the
+   * dragged name's seat on the source card. With no source (a name that came
+   * from nowhere — the combobox, in practice) the outgoing member simply
+   * becomes unassigned.
+   */
+  function applyDrop(
+    targetId: string,
+    name: string,
+    fromPartyId: string | null,
+    swapOut?: string
+  ) {
+    const target = parties.find((party) => party.id === targetId)
+    if (!target) return
+    const source =
+      fromPartyId && fromPartyId !== targetId
+        ? parties.find((party) => party.id === fromPartyId)
+        : undefined
+
+    const now = new Date().toISOString()
+    const next = parties.map((party) => {
+      if (party.id === targetId) {
+        return {
+          ...party,
+          memberNames: [
+            ...party.memberNames.filter((member) => member !== swapOut),
+            name,
+          ],
+          updatedAt: now,
+        }
+      }
+      if (party.id === source?.id) {
+        const kept = party.memberNames.filter((member) => member !== name)
+        return {
+          ...party,
+          memberNames: swapOut ? [...kept, swapOut] : kept,
+          updatedAt: now,
+        }
+      }
+      return party
+    })
+
+    const where = swapOut
+      ? `สลับ ${name} เข้า ${target.name} แทน ${swapOut} แล้ว`
+      : source
+        ? `ย้าย ${name} จาก ${source.name} มา ${target.name} แล้ว`
+        : `เพิ่ม ${name} เข้า ${target.name} แล้ว`
+    void put(
+      next,
+      where,
+      swapOut && source
+        ? `${swapOut} ไปอยู่ ${source.name} แทน`
+        : undefined
+    )
+  }
+
+  /**
+   * Dropping one name directly onto another opens the seat dialog.
+   *
+   * A seat drop has two sensible meanings and the difference is invisible while
+   * dragging: swap the two players, or (when the target team has room) just add
+   * the dragged player and leave the person under the finger alone. The dialog
+   * asks rather than guessing, because a wrong guess moves two people at once.
+   */
+  function requestSeatDrop(
+    fromPartyId: string,
+    name: string,
+    targetPartyId: string,
+    targetName: string
+  ) {
+    const source = parties.find((party) => party.id === fromPartyId)
+    const target = parties.find((party) => party.id === targetPartyId)
+    if (!source || !target || source.id === target.id) return
+    if (!source.memberNames.includes(name) || !target.memberNames.includes(targetName)) return
+    setSeatRequest({ name, fromTeamId: source.id, targetTeamId: target.id, targetName })
+  }
+
+  /** Exchanges the two names' seats; both teams keep their size. */
+  function applySeatSwap(
+    fromPartyId: string,
+    name: string,
+    targetPartyId: string,
+    targetName: string
+  ) {
+    const source = parties.find((party) => party.id === fromPartyId)
+    const target = parties.find((party) => party.id === targetPartyId)
+    if (!source || !target) return
+
+    const now = new Date().toISOString()
+    const next = parties.map((party) => {
+      if (party.id === source.id) {
+        return {
+          ...party,
+          memberNames: party.memberNames.map((member) =>
+            member === name ? targetName : member
+          ),
+          updatedAt: now,
+        }
+      }
+      if (party.id === target.id) {
+        return {
+          ...party,
+          memberNames: party.memberNames.map((member) =>
+            member === targetName ? name : member
+          ),
+          updatedAt: now,
+        }
+      }
+      return party
+    })
+    void put(next, `สลับ ${name} กับ ${targetName} แล้ว`)
+  }
+
+  /**
+   * Exchanges two players' seats inside one party — the only way to change the
+   * order the five are listed in.
+   *
+   * The list order is the stored slot order (`party_members.slot`), which is
+   * what an event board shows when the guild master picks “ตามลำดับที่จัดไว้”.
+   * Adding always appends, so without this a name could never move up. Dropping
+   * a name on another name in the same card is the drag path; on phones, where
+   * the long-press drag is fiddly, every row also carries ↑/↓ buttons.
+   * (The buttons are hidden from `sm` up, where a mouse makes the drag easy.)
+   *
+   * No confirmation: it moves nothing between teams and one tap puts it back.
+   */
+  function swapSeats(partyId: string, name: string, otherName: string) {
+    const party = parties.find((current) => current.id === partyId)
+    if (!party) return
+
+    const memberNames = swapMemberSeats(party.memberNames, name, otherName)
+    // Identity means the helper refused: unknown name, or a drop on itself.
+    if (memberNames === party.memberNames) return
+
+    const now = new Date().toISOString()
+    void put(
+      parties.map((current) =>
+        current.id === partyId
+          ? { ...current, memberNames, updatedAt: now }
+          : current
+      ),
+      `สลับลำดับ ${name} กับ ${otherName} ใน ${party.name} แล้ว`
+    )
+  }
+
+  /** The ↑/↓ buttons: swap a seat with its neighbour, which is one step. */
+  function moveSeat(partyId: string, name: string, delta: -1 | 1) {
+    const party = parties.find((current) => current.id === partyId)
+    if (!party) return
+    const from = party.memberNames.indexOf(name)
+    const to = from + delta
+    if (from < 0 || to < 0 || to >= party.memberNames.length) return
+    swapSeats(partyId, name, party.memberNames[to])
   }
 
   /**
@@ -450,14 +717,32 @@ export function PartyBuilder({
       | undefined
     setDragging(null)
 
+    if (data?.type !== "member" || !data.name || !data.from) return
+
+    // Dropped onto another player's row: exchange the two seats.
+    const overData = event.over?.data.current as
+      | { type?: string; partyId?: string; name?: string }
+      | undefined
+    if (overData?.type === "member-seat" && overData.partyId && overData.name) {
+      // Same card: the two names trade seats, which changes the order they are
+      // listed in — no dialog, because nothing leaves the team. Across cards it
+      // is a transfer, whose two meanings (swap players / add to the team) need
+      // the dialog.
+      if (overData.partyId === data.from) {
+        swapSeats(data.from, data.name, overData.name)
+      } else {
+        requestSeatDrop(data.from, data.name, overData.partyId, overData.name)
+      }
+      return
+    }
+
     const overId = event.over?.id
-    if (data?.type !== "member" || !data.name) return
     if (typeof overId !== "string" || !overId.startsWith(PARTY_DROP_PREFIX)) return
 
     const partyId = overId.slice(PARTY_DROP_PREFIX.length)
     // Dropped back where it came from: nothing to write.
     if (data.from === partyId) return
-    void addMember(partyId, data.name, data.from ?? null)
+    void requestDrop(partyId, data.name, data.from)
   }
 
   return (
@@ -500,7 +785,7 @@ export function PartyBuilder({
             }
             title="เพิ่มปาร์ตี้"
             submitLabel="เพิ่มปาร์ตี้"
-            initial={{ name: "", content: "" }}
+            initial={{ name: "", placements: [] }}
             onSubmit={createParty}
           />
           {/*
@@ -567,7 +852,7 @@ export function PartyBuilder({
 
       <DndContext
         sensors={sensors}
-        collisionDetection={rectIntersection}
+        collisionDetection={preferMemberSeat}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onDragCancel={() => setDragging(null)}
@@ -587,6 +872,15 @@ export function PartyBuilder({
           <MoveHorizontal className="mt-0.5 size-3.5 shrink-0" aria-hidden />
           {DRAG_HINT}
         </p>
+        <p className="text-muted-foreground flex items-start gap-1.5 text-xs sm:hidden">
+          <ChevronUp className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          สลับลำดับการ์ดด้วยปุ่ม ↑↓ ที่หัวการ์ด — ลำดับนี้คือลำดับเริ่มต้นของทีมในทุกบอร์ด
+        </p>
+        <p className="text-muted-foreground flex items-start gap-1.5 text-xs sm:hidden">
+          <ChevronUp className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          สลับลำดับคนในปาร์ตี้ด้วยปุ่ม ↑↓ ข้างชื่อ หรือลากชื่อไปวางบนชื่อในปาร์ตี้เดียวกัน
+          — ลำดับนี้คือ “ตามลำดับที่จัดไว้” บนบอร์ด
+        </p>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <MemberPlacementProvider parties={parties}>
@@ -596,15 +890,20 @@ export function PartyBuilder({
                 “สุ่มปาร์ตี้” ถ้าจะจัดคนที่ยังไม่มีทีมทั้งหมดเลย
               </p>
             ) : (
-              parties.map((party) => (
+              parties.map((party, index) => (
                 <PartyCard
                   key={party.id}
                   party={party}
                   members={members}
+                  eventRows={eventRows}
                   byName={byName}
                   busy={busy}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < parties.length - 1}
+                  onMove={moveParty}
                   onAdd={addMember}
                   onRemove={removeMember}
+                  onMoveSeat={moveSeat}
                   onRename={renameParty}
                   onToggleLock={toggleLock}
                   onDelete={deleteParty}
@@ -623,6 +922,51 @@ export function PartyBuilder({
         </DragOverlay>
       </DndContext>
 
+      {/*
+        Mounted only while a drop is waiting for an answer, so the selected
+        replacement starts empty for every drop instead of remembering the
+        previous one.
+      */}
+      {swapRequest && (
+        <SwapMemberDialog
+          request={swapRequest}
+          parties={parties}
+          byName={byName}
+          onCancel={() => setSwapRequest(null)}
+          onConfirm={(outgoing) => {
+            const request = swapRequest
+            setSwapRequest(null)
+            applyDrop(request.targetId, request.name, request.fromPartyId, outgoing)
+          }}
+        />
+      )}
+
+      {seatRequest && (
+        <MemberDropDialog
+          request={seatRequest}
+          parties={parties}
+          addLabel="เพิ่มเข้าปาร์ตี้"
+          onCancel={() => setSeatRequest(null)}
+          onSwap={() => {
+            const request = seatRequest
+            setSeatRequest(null)
+            applySeatSwap(
+              request.fromTeamId,
+              request.name,
+              request.targetTeamId,
+              request.targetName
+            )
+          }}
+          onAdd={() => {
+            const request = seatRequest
+            setSeatRequest(null)
+            // `applyDrop` moves the name out of its old card and adds it to the
+            // target; the person it was dropped on stays put.
+            applyDrop(request.targetTeamId, request.name, request.fromTeamId)
+          }}
+        />
+      )}
+
       {confirmDialog}
     </div>
   )
@@ -632,40 +976,188 @@ export function PartyBuilder({
 
 const PARTY_DROP_PREFIX = "party:"
 const MEMBER_DRAG_PREFIX = "member:"
+const MEMBER_SEAT_DROP_PREFIX = "member-seat:"
+
+/**
+ * Prefer a person's row over the card that contains it.
+ *
+ * Both are drop targets and both intersect the dragged chip, but a row is
+ * strictly smaller than its card, so a plain `rectIntersection` can report the
+ * card first and turn "swap these two players" into "move into this team".
+ * When any row is under the pointer, it wins.
+ */
+const preferMemberSeat: CollisionDetection = (args) => {
+  const collisions = rectIntersection(args)
+  const seat = collisions.find(
+    (collision) =>
+      collision.data?.droppableContainer.data.current?.type === "member-seat"
+  )
+  if (!seat) return collisions
+  return [seat, ...collisions.filter((collision) => collision.id !== seat.id)]
+}
+
+/** A name dropped on a full party: `targetId` is where it wants to go. */
+type SwapRequest = {
+  name: string
+  fromPartyId: string | null
+  targetId: string
+}
+
+/**
+ * "This party is full — who makes way?"
+ *
+ * Selecting a row and pressing the footer button *is* the confirmation; there
+ * is no second dialog. The outgoing member takes the dragged name's old seat on
+ * the source card, so the swap keeps both teams at the same size instead of
+ * leaving one person unassigned.
+ */
+function SwapMemberDialog({
+  request,
+  parties,
+  byName,
+  onCancel,
+  onConfirm,
+}: {
+  request: SwapRequest
+  parties: Party[]
+  byName: Map<string, MemberStatus>
+  onCancel: () => void
+  onConfirm: (outgoing: string) => void
+}) {
+  const [outgoing, setOutgoing] = React.useState<string | null>(null)
+  const target = parties.find((party) => party.id === request.targetId)
+  const source = request.fromPartyId
+    ? parties.find((party) => party.id === request.fromPartyId)
+    : undefined
+
+  if (!target) return null
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>ปาร์ตี้เต็ม — สลับคนออก</DialogTitle>
+          <DialogDescription>
+            “{target.name}” มี {TEAM_MAX_MEMBERS} คนแล้ว เลือกคนที่จะสลับออกเพื่อให้{" "}
+            {request.name} เข้าทีม
+            {source
+              ? ` · ${request.name} จะออกจาก “${source.name}” และคนที่ถูกสลับออกจะไปอยู่แทน`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium">
+            เลือกคนที่จะออกจาก {target.name}
+          </p>
+          <div className="grid gap-1.5">
+            {target.memberNames.map((name) => {
+              const member = byName.get(name)
+              const selected = outgoing === name
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => setOutgoing(name)}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg border p-2 text-left transition-colors touch-manipulation",
+                    selected
+                      ? "border-primary bg-secondary"
+                      : "hover:bg-muted"
+                  )}
+                >
+                  {member ? (
+                    <GameIcon job={member.job} className="size-7" />
+                  ) : (
+                    <span aria-hidden className="bg-muted size-7 shrink-0 rounded-md" />
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">{name}</span>
+                    {member && (
+                      <span className="text-muted-foreground block truncate text-xs">
+                        {member.job}
+                      </span>
+                    )}
+                  </span>
+                  {selected && (
+                    <span className="text-primary shrink-0 text-xs font-medium">
+                      จะถูกสลับออก
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" className="touch-manipulation" onClick={onCancel}>
+            ยกเลิก
+          </Button>
+          <Button
+            className="touch-manipulation"
+            disabled={!outgoing}
+            onClick={() => outgoing && onConfirm(outgoing)}
+          >
+            {outgoing ? "สลับและบันทึก" : "เลือกคนที่จะสลับ"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 const DRAG_HINT =
-  "ลากชื่อจากปาร์ตี้หนึ่งไปอีกปาร์ตี้เพื่อย้าย · เพิ่มคนใหม่ใช้ช่อง “เพิ่มคน” ท้ายการ์ด" +
+  "ลากชื่อไปวางบนชื่ออีกคนในปาร์ตี้เดียวกันเพื่อสลับลำดับ" +
+  " · วางบนชื่อในปาร์ตี้อื่นเพื่อเลือกสลับที่หรือเพิ่มเข้าทีม" +
+  " · ลากไปวางบนการ์ดเพื่อย้ายเข้าปาร์ตี้" +
+  " · เพิ่มคนใหม่ใช้ช่อง “เพิ่มคน” ท้ายการ์ด" +
   " (บนมือถือ: กดค้างชื่อประมาณครึ่งวินาทีก่อนลาก)"
 
 /**
  * One party, and a drop target for dragged names.
  *
- * The card is not draggable and does not sort its members: the only drag here
- * is moving a name from one card to another, which changes two `memberNames`
- * lists at once (the source loses them). Adding someone is the combobox below —
- * there is no member list to drag from any more. Slot order was dropped with the
- * old editor: neither the game nor the database cares which of the five is listed
- * first.
- * order was dropped with the old editor: neither the game nor the database cares
- * which of the five is listed first.
+ * The card itself is not draggable; a member row is. Dropping a name on another
+ * name in the same card swaps their seats (changes the list order), and dropping
+ * it on a different card moves it between teams. On phones every row also has
+ * ↑/↓ buttons for the same reorder — hidden from `sm` up to keep desktop cards
+ * compact, where the pointer makes the drag easy.
+ *
+ * The order is meaningful: `saveParties` writes each name's index into
+ * `party_members.slot`, and the event boards show that slot order when the guild
+ * master picks “ตามลำดับที่จัดไว้”.
  */
 function PartyCard({
   party,
   members,
+  eventRows,
   byName,
   busy,
+  canMoveUp,
+  canMoveDown,
+  onMove,
   onAdd,
   onRemove,
+  onMoveSeat,
   onRename,
   onToggleLock,
   onDelete,
 }: {
   party: Party
   members: MemberStatus[]
+  eventRows: EventRow[]
   byName: Map<string, MemberStatus>
   busy: boolean
+  /** Whether this card has a neighbour above/below in the tab. */
+  canMoveUp: boolean
+  canMoveDown: boolean
+  /** Swaps this card with its neighbour; writes the whole tab order. */
+  onMove: (partyId: string, delta: -1 | 1) => void
   onAdd: (partyId: string, name: string) => void | Promise<void>
   onRemove: (party: Party, name: string) => void
+  /** Moves one player up/down inside this card; writes the slot order. */
+  onMoveSeat: (partyId: string, name: string, delta: -1 | 1) => void
   onRename: (party: Party, values: PartyFormValues) => void
   onToggleLock: (party: Party) => void
   onDelete: (party: Party) => void
@@ -673,6 +1165,7 @@ function PartyCard({
   const { setNodeRef, isOver } = useDroppable({ id: `${PARTY_DROP_PREFIX}${party.id}` })
 
   const rows = party.memberNames.map((name) => ({ name, member: byName.get(name) }))
+  const label = derivePartyContent(party, eventRows)
   const present = rows.filter((entry) => entry.member?.status === "present").length
   const full = party.memberNames.length >= TEAM_MAX_MEMBERS
 
@@ -691,6 +1184,28 @@ function PartyCard({
             {rows.length} คน · มาวันนี้ {present} คน
           </CardDescription>
           <CardAction className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground size-9 touch-manipulation sm:hidden"
+              aria-label={`เลื่อน ${party.name} ขึ้น`}
+              title={`เลื่อน ${party.name} ขึ้น`}
+              disabled={busy || !canMoveUp}
+              onClick={() => onMove(party.id, -1)}
+            >
+              <ChevronUp />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground size-9 touch-manipulation sm:hidden"
+              aria-label={`เลื่อน ${party.name} ลง`}
+              title={`เลื่อน ${party.name} ลง`}
+              disabled={busy || !canMoveDown}
+              onClick={() => onMove(party.id, 1)}
+            >
+              <ChevronDown />
+            </Button>
             <PartyFormDialog
               trigger={
                 <Button
@@ -705,7 +1220,7 @@ function PartyCard({
               }
               title={`แก้ไข “${party.name}”`}
               submitLabel="บันทึก"
-              initial={{ name: party.name, content: party.content ?? "" }}
+              initial={{ name: party.name, placements: party.placements }}
               onSubmit={(values) => onRename(party, values)}
             />
             <DragSafe>
@@ -753,9 +1268,9 @@ function PartyCard({
               <span className="truncate">ล็อคไว้ — ลบทั้งหมดจะข้ามทีมนี้</span>
             </Badge>
           )}
-          {party.content && (
+          {label && (
             <Badge variant="outline" className="max-w-full">
-              <span className="truncate">{party.content}</span>
+              <span className="truncate">{label}</span>
             </Badge>
           )}
 
@@ -765,7 +1280,7 @@ function PartyCard({
             </p>
           ) : (
             <ul className="divide-border divide-y">
-              {rows.map(({ name, member }) => (
+              {rows.map(({ name, member }, index) => (
                 <MemberRow
                   key={name}
                   name={name}
@@ -773,6 +1288,9 @@ function PartyCard({
                   partyName={party.name}
                   partyId={party.id}
                   busy={busy}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < rows.length - 1}
+                  onMove={(delta) => onMoveSeat(party.id, name, delta)}
                   onRemove={() => onRemove(party, name)}
                 />
               ))}
@@ -802,13 +1320,21 @@ function PartyCard({
   )
 }
 
-/** A member inside a party card: draggable to another card, with a remove ✕. */
+/**
+ * A member inside a party card.
+ *
+ * Draggable onto another row (same card: swap order, other card: transfer), with
+ * ↑/↓ buttons on phones for the same reorder, plus the remove ✕.
+ */
 function MemberRow({
   name,
   member,
   partyName,
   partyId,
   busy,
+  canMoveUp,
+  canMoveDown,
+  onMove,
   onRemove,
 }: {
   name: string
@@ -816,13 +1342,31 @@ function MemberRow({
   partyName: string
   partyId: string
   busy: boolean
+  canMoveUp: boolean
+  canMoveDown: boolean
+  onMove: (delta: -1 | 1) => void
   onRemove: () => void
 }) {
-  const { setNodeRef, listeners, attributes, isDragging } = useDraggable({
+  const { setNodeRef: setDragRef, listeners, attributes, isDragging } = useDraggable({
     id: `${MEMBER_DRAG_PREFIX}${name}`,
     data: { type: "member", name, from: partyId },
     disabled: busy,
   })
+  // The row is also a drop target: dropping a name here swaps the two seats.
+  // Both refs go on the same element, or the swoppable area would be a child
+  // that the drag listeners never reach.
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: `${MEMBER_SEAT_DROP_PREFIX}${partyId}:${name}`,
+    data: { type: "member-seat", partyId, name },
+    disabled: busy,
+  })
+  const setNodeRef = React.useCallback(
+    (node: HTMLElement | null) => {
+      setDragRef(node)
+      setDropRef(node)
+    },
+    [setDragRef, setDropRef]
+  )
 
   return (
     <li
@@ -830,7 +1374,10 @@ function MemberRow({
       {...listeners}
       {...attributes}
       style={{ opacity: isDragging ? 0.35 : 1 }}
-      className="flex cursor-grab items-center gap-3 py-1.5 touch-manipulation active:cursor-grabbing"
+      className={cn(
+        "flex cursor-grab items-center gap-3 rounded-md py-1.5 touch-manipulation active:cursor-grabbing",
+        isOver && "bg-secondary ring-primary/40 ring-2"
+      )}
     >
       {member ? (
         <GameIcon job={member.job} className="size-7" />
@@ -854,6 +1401,38 @@ function MemberRow({
       ) : (
         <span className="text-muted-foreground shrink-0 text-xs">นอกรายชื่อ</span>
       )}
+      {/*
+        The no-drag way to change the slot order, shown only where the drag is
+        hardest (phones). Kept in a column so it costs width, not the name: on a
+        320px screen the row has no width to spare and a truncated player name is
+        how someone loses their own seat.
+      */}
+      <DragSafe className="sm:hidden">
+        <span className="flex shrink-0 flex-col">
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground size-7 touch-manipulation sm:size-6"
+            aria-label={`เลื่อน ${name} ขึ้นใน ${partyName}`}
+            title={`เลื่อน ${name} ขึ้น`}
+            disabled={busy || !canMoveUp}
+            onClick={() => onMove(-1)}
+          >
+            <ChevronUp />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground size-7 touch-manipulation sm:size-6"
+            aria-label={`เลื่อน ${name} ลงใน ${partyName}`}
+            title={`เลื่อน ${name} ลง`}
+            disabled={busy || !canMoveDown}
+            onClick={() => onMove(1)}
+          >
+            <ChevronDown />
+          </Button>
+        </span>
+      </DragSafe>
       <DragSafe>
         <Button
           variant="ghost"
@@ -885,23 +1464,20 @@ function MemberOverlay({ member }: { member: MemberStatus }) {
 
 interface PartyFormValues {
   name: string
-  content: string
+  placements: PartyPlacement[]
 }
 
 /**
  * Name + label, for both making a party and editing one.
  *
- * The label chips are the whole interface for the label: a party's `content`
- * decides which event pages it shows on, and the site matches it against
- * `compact`ed keywords. A hand-typed label only has to *look* right to whoever
- * typed it while matching nothing at all — the team then appears in no event,
- * only in the "ว่าง" row of every page. So the field is gone rather than
- * optional, and `stripCustomLabels` cleans up the ones typed before it was.
+ * The chips are the whole interface for event participation: each chip writes
+ * one placement, and the event pages read those placements directly. There is
+ * no hand-typed label to match, so a team can only appear on a board the chips
+ * offer.
  *
- * A fixed team that plays several events taps several chips — the label then
- * reads `"Guild War + Guild League ลีคหลัก"`, and each event page reads only its
- * own part. The chips are grouped by page so the two league chips read as one
- * event with two divisions rather than as two more events.
+ * A fixed team that plays several events taps several chips. The chips are
+ * grouped by page so the two league chips read as one event with two divisions
+ * rather than as two more events.
  */
 function PartyFormDialog({
   trigger,
@@ -918,7 +1494,7 @@ function PartyFormDialog({
 }) {
   const [open, setOpen] = React.useState(false)
   const [name, setName] = React.useState(initial.name)
-  const [content, setContent] = React.useState(() => stripCustomLabels(initial.content))
+  const [placements, setPlacements] = React.useState(initial.placements)
   const nameId = React.useId()
 
   return (
@@ -926,12 +1502,10 @@ function PartyFormDialog({
       open={open}
       onOpenChange={(next) => {
         // Re-seed every time it opens: after an edit, the previous values must
-        // not come back as the starting point. The label comes in stripped —
-        // a typed tag that names no event lights no chip and would look like
-        // the party had none.
+        // not come back as the starting point.
         if (next) {
           setName(initial.name)
-          setContent(stripCustomLabels(initial.content))
+          setPlacements(initial.placements)
         }
         setOpen(next)
       }}
@@ -962,8 +1536,8 @@ function PartyFormDialog({
           <div className="space-y-1.5">
             <Label>ป้ายกำกับ</Label>
             <PartyLabelChips
-              content={content}
-              onChange={(next) => setContent(next)}
+              placements={placements}
+              onChange={(next) => setPlacements(next)}
             />
           </div>
         </div>
@@ -979,10 +1553,7 @@ function PartyFormDialog({
           <Button
             className="touch-manipulation"
             onClick={() => {
-              // Stripped again on the way out: the chips can only ever produce
-              // segments that match an event, so this only matters for a party
-              // whose label predates the editor.
-              onSubmit({ name, content: stripCustomLabels(content) })
+              onSubmit({ name, placements })
               setOpen(false)
             }}
           >

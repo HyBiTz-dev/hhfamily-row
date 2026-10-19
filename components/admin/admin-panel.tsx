@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MemberManager } from "@/components/admin/member-manager";
+import { MemberImport } from "@/components/admin/member-import";
 import { PartyBuilder } from "@/components/admin/party-builder";
 import { HistoryTable } from "@/components/admin/history-table";
 import { AbsenceWarnings } from "@/components/admin/absence-warnings";
@@ -21,6 +22,7 @@ import { absencesFor } from "@/lib/rngw/attendance";
 import { setAdminSession, useAdminSession } from "@/hooks/use-admin-session";
 import type {
   AttendanceRow,
+  EventRow,
   Member,
   Party,
   RosterResponse,
@@ -122,6 +124,9 @@ type AdminData = {
   allMembers: Member[];
   attendance: AttendanceRow[];
   parties: Party[];
+  eventRows: EventRow[];
+  /** Optimistic-lock token for the parties tab; a write sends it back. */
+  partyVersion: number;
 };
 
 /**
@@ -137,6 +142,14 @@ function AdminBody() {
   const [busy, setBusy] = React.useState(true);
   const [nonce, setNonce] = React.useState(0);
 
+  /**
+   * The parties snapshot version this panel last saw. A ref so the party
+   * builder reads the value a previous write produced, and so a tab switch
+   * (which unmounts and remounts the builder) does not re-seed it from a stale
+   * prop. Re-read from the view on every refresh.
+   */
+  const partyVersionRef = React.useRef<number | null>(null);
+
   // All setState calls land inside the promise callbacks rather than in the
   // effect body, which is what react-hooks/set-state-in-effect allows.
   React.useEffect(() => {
@@ -147,6 +160,8 @@ function AdminBody() {
       .then(({ res, body }) => {
         if (cancelled) return;
         if (!res.ok) throw new Error(body.error ?? "โหลดข้อมูลไม่สำเร็จ");
+        partyVersionRef.current =
+          typeof body.partyVersion === "number" ? body.partyVersion : 0;
         setData(body);
         setError(null);
       })
@@ -198,8 +213,15 @@ function AdminBody() {
         </p>
       ) : (
         <Tabs defaultValue="members">
-          <TabsList>
+          {/*
+            Five tabs at 320px overflow the content width. `h-auto!` is required
+            because shadcn's TabsList sets a fixed 32px height via a variant;
+            wrapping keeps every page reachable without a hidden horizontal
+            scroll (see AGENTS.md).
+          */}
+          <TabsList className="h-auto! flex-wrap">
             <TabsTrigger value="members">สมาชิก</TabsTrigger>
+            <TabsTrigger value="import">นำเข้าไฟล์</TabsTrigger>
             <TabsTrigger value="parties">จัดปาร์ตี้</TabsTrigger>
             <TabsTrigger value="history">ประวัติ</TabsTrigger>
             <TabsTrigger value="absences">
@@ -217,14 +239,21 @@ function AdminBody() {
               members={data.allMembers}
               absences={absences}
               attendance={data.attendance}
+              parties={data.parties}
               onSaved={refresh}
             />
+          </TabsContent>
+
+          <TabsContent value="import" className="mt-4">
+            <MemberImport members={data.allMembers} onSaved={refresh} />
           </TabsContent>
 
           <TabsContent value="parties" className="mt-4">
             <PartyBuilder
               members={data.roster.roster}
               parties={data.parties}
+              eventRows={data.eventRows}
+              versionRef={partyVersionRef}
               // Only the parties tab changes, so the list is updated in place
               // instead of re-reading the whole admin view from the script.
               onChange={(next) =>
@@ -247,6 +276,7 @@ function AdminBody() {
               members={data.allMembers}
               absences={absences}
               attendance={data.attendance}
+              parties={data.parties}
               onSaved={refresh}
             />
           </TabsContent>

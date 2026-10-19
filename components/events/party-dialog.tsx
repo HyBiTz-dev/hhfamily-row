@@ -14,7 +14,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { PortalContainerProvider } from "@/components/portal-container"
 import { PartyBuilder } from "@/components/admin/party-builder"
-import type { MemberStatus, Party } from "@/lib/rngw/types"
+import type { EventRow, MemberStatus, Party } from "@/lib/rngw/types"
 
 /**
  * The party builder, opened without leaving the event page.
@@ -26,11 +26,20 @@ import type { MemberStatus, Party } from "@/lib/rngw/types"
 export function PartyDialog({
   members,
   parties,
+  eventRows,
+  versionRef,
   onChange,
 }: {
   members: MemberStatus[]
   /** The parties tab as it is on the sheet — what members see right now. */
   parties: Party[]
+  /** Box names, so the cards show the label derived from placements. */
+  eventRows: EventRow[]
+  /**
+   * The board's optimistic-lock token, shared with the dialog's own writer so
+   * the two never overwrite each other or 409 on their own last save.
+   */
+  versionRef: React.RefObject<number | null>
   /** Applied to the board behind the dialog as soon as a write succeeds. */
   onChange: (next: Party[]) => void
 }) {
@@ -65,6 +74,8 @@ export function PartyDialog({
             <PartyBuilder
               members={members}
               parties={parties}
+              eventRows={eventRows}
+              versionRef={versionRef}
               onChange={onChange}
             />
           </ScrollArea>
