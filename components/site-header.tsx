@@ -36,10 +36,10 @@ export function SiteHeader() {
         </Link>
 
         {/*
-          Mobile menu. Measured at 320px: brand + 3 nav links + admin button +
+          Mobile menu. Measured at 320px: brand + 4 nav links + admin button +
           theme toggle need ~520px, and only ~288px is usable after px-4, so the
           links would be squeezed into an 82px scroll strip that shows one page
-          and hides two. The sheet shows all of them at full width instead.
+          and hides the rest. The sheet shows all of them at full width instead.
         */}
         <MobileMenu authed={authed} />
 

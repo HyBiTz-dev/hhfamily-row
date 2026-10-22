@@ -128,3 +128,86 @@ export interface RosterResponse {
   timeZone: string;
   roster: MemberStatus[];
 }
+
+/** Optional note cap, shared by the routes and the sign-up form. */
+export const CARRY_NOTE_MAX_LENGTH = 100;
+
+/** Cap for a room's name/activity label. */
+export const CARRY_ROOM_TITLE_MAX_LENGTH = 80;
+
+/**
+ * Hard cap on the number of rooms in the whole board.
+ *
+ * Rooms are public to create, so without a cap one person can fill the page
+ * with empty rooms. The server enforces this inside the insert; the button
+ * only mirrors it for convenience. Admins can free slots with the empty-room
+ * cleanup, but a non-empty queue always has to be moved or cleared first.
+ */
+export const CARRY_ROOM_LIMIT = 10;
+
+/** A room's management PIN is short enough to type on a phone, long enough to
+ * not be a single tap. Both numbers are shared by the route and the dialogs. */
+export const CARRY_PIN_MIN_LENGTH = 4;
+export const CARRY_PIN_MAX_LENGTH = 12;
+
+/**
+ * A "ห้องแบก" — one carrier's queue for one activity.
+ *
+ * A member may run several rooms, and each room has its own management PIN and
+ * its own open/closed switch. `id` is the route parameter; the PIN hash stays
+ * on the server and is deliberately absent from this shape.
+ */
+export interface CarryRoom {
+  id: number;
+  carrierName: string;
+  title: string;
+  open: boolean;
+  createdAt: number;
+}
+
+/**
+ * One person waiting in a room's queue.
+ *
+ * The queue is global in the sense that a member can be in only one room at a
+ * time, so `name` is unique across the whole table. `signedAt` plus the stored
+ * sequence keeps the order deterministic; a transfer refreshes `signedAt` so the
+ * member lands at the end of the destination queue.
+ */
+export interface CarrySignup {
+  roomId: number;
+  name: string;
+  /**
+   * Optional freeform note the member typed when signing up, e.g. "ว่างหลัง
+   * สามทุ่ม". Kept short (the route and the input both cap it at 100 chars) and
+   * shown under the name in the queue.
+   */
+  note?: string;
+  signedAt: number;
+}
+
+/** Where a name already sits, used to explain a refused duplicate sign-up. */
+export interface CarryQueueLocation {
+  roomId: number;
+  roomTitle: string;
+  carrierName: string;
+}
+
+/** Body of `GET /api/carry-signups`: every room, every queue, and the roster.
+ *
+ * `authorizedRoomIds` is computed from the carrier session cookies on the
+ * server. It is not a permission check by itself — every write route checks the
+ * same cookie again — but it lets the page show the correct controls without
+ * shipping any PIN or hash to the browser.
+ */
+export interface CarryBoardResponse {
+  rooms: CarryRoom[];
+  signups: CarrySignup[];
+  members: Member[];
+  authorizedRoomIds: number[];
+  /**
+   * True only for the guild-admin session, not for a carrier who happens to
+   * hold every room's PIN. The page uses it for the bulk "remove empty rooms"
+   * tool; the API checks the admin session again before every deletion.
+   */
+  isAdmin: boolean;
+}

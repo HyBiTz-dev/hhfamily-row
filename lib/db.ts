@@ -15,6 +15,11 @@ import "server-only";
  *               place — see lib/rngw/attendance.ts. Open: members submit
  *               without a PIN, since the worst they can do is add a status row.
  *
+ *   carry_rooms / carry_signups
+ *               the "ลงชื่อแบกดัน" queues. A room belongs to one carrier and
+ *               carries a scrypt hash of its management PIN. Members sign up
+ *               openly, but a name may sit in only one room at a time.
+ *
  *   parties     party identity: name, locked flag, global order, and two retired
  *               display-cache columns (`content`, `members`) kept so older
  *               databases still open. Every writer stores NULL / '[]' in them;
@@ -40,12 +45,15 @@ import { createClient, type Client, type InStatement, type Row } from "@libsql/c
 import type {
   AttendanceRow,
   AttendanceStatus,
+  CarryQueueLocation,
+  CarryRoom,
+  CarrySignup,
   EventRow,
   Member,
   Party,
   PartyPlacement,
 } from "@/lib/rngw/types";
-import { isAttendanceStatus } from "@/lib/rngw/types";
+import { CARRY_ROOM_LIMIT, isAttendanceStatus } from "@/lib/rngw/types";
 import { isJobName } from "@/lib/rngw/jobs";
 import { dedupeEventRows, normalizePlacements } from "@/lib/party";
 import {
@@ -71,6 +79,22 @@ export class PartyConflictError extends Error {}
  * turns this into 400, because a valid client cannot produce it.
  */
 export class PartyInvariantError extends Error {}
+
+/**
+ * A room delete refused because people are still queued in it.
+ *
+ * The carrier must move or remove them first; deleting the room would otherwise
+ * silently erase the queue of everyone waiting on that activity. The route turns
+ * this into 409 with the count.
+ */
+export class CarryRoomNotEmptyError extends Error {
+  readonly count: number;
+
+  constructor(count: number) {
+    super(`ห้องนี้ยังมี ${count} คนในคิว`);
+    this.count = count;
+  }
+}
 
 /**
  * `app_meta` key holding the version of the whole parties snapshot.
@@ -239,6 +263,21 @@ const SCHEMA: string[] = [
   `CREATE INDEX IF NOT EXISTS attendance_by_date ON attendance(date)`,
   `CREATE INDEX IF NOT EXISTS attendance_by_member ON attendance(name, date, submitted_at)`,
 
+  // A "ห้องแบก": one carrier's queue for one activity. The PIN is stored as a
+  // scrypt hash; `auth_version` is bumped when the PIN changes so old carrier
+  // cookies stop working. `carry_signups` is created by `ensureCarrySchema`
+  // because its first shape (one global queue) had to be replaced, not altered.
+  `CREATE TABLE IF NOT EXISTS carry_rooms (
+     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+     carrier_name TEXT NOT NULL,
+     title        TEXT NOT NULL,
+     pin_hash     TEXT NOT NULL,
+     auth_version INTEGER NOT NULL DEFAULT 1,
+     open         INTEGER NOT NULL DEFAULT 1,
+     created_at   INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS carry_rooms_by_carrier ON carry_rooms(carrier_name, created_at)`,
+
   `CREATE TABLE IF NOT EXISTS parties (
      id         TEXT PRIMARY KEY,
      name       TEXT NOT NULL,
@@ -258,9 +297,11 @@ const SCHEMA: string[] = [
 
 let schemaReady: Promise<void> | null = null;
 let cleanupReady: Promise<void> | null = null;
+let carrySchemaReady: Promise<void> | null = null;
 
 /**
- * Runs `statements` after the schema and the one-time cleanup are ready.
+ * Runs `statements` after the schema, the one-time carry-table migration, and
+ * the archived-member cleanup are ready.
  *
  * Lazy rather than a migration step because there is no build step to hang it
  * off on Vercel: every cold start is a fresh process with no memory of what ran
@@ -274,6 +315,9 @@ let cleanupReady: Promise<void> | null = null;
  */
 async function run(statements: InStatement[]): Promise<Row[][]> {
   await createSchema();
+  // Must run before `dropBenchedMembers`, which deletes carry rows for archived
+  // members and therefore needs the new table to exist.
+  await ensureCarrySchema();
   await dropBenchedMembers();
 
   const results = await db().batch(statements, "write");
@@ -320,8 +364,11 @@ function dropBenchedMembers(): Promise<void> {
 
     await db().batch(
       [
-        // Both in one batch: one transaction, so a failure cannot delete the
-        // history and keep the roster row — a member with rows but no name.
+        // One batch: one transaction, so a failure cannot delete the history or
+        // the sign-up and keep the roster row — a member with rows but no name.
+        {
+          sql: "DELETE FROM carry_signups WHERE name IN (SELECT name FROM members WHERE active = 0)",
+        },
         {
           sql: "DELETE FROM attendance WHERE name IN (SELECT name FROM members WHERE active = 0)",
         },
@@ -340,6 +387,56 @@ function dropBenchedMembers(): Promise<void> {
   return cleanupReady;
 }
 
+/**
+ * Creates the room-scoped queue, replacing the old single global queue once.
+ *
+ * The first version of "ลงชื่อแบกดัน" had `carry_signups(name UNIQUE, note,
+ * signed_at)` and no rooms. `CREATE TABLE IF NOT EXISTS` cannot add `room_id`,
+ * so a database that still has the old shape is dropped and recreated. This is
+ * intentionally destructive: the guild master chose to clear the old list when
+ * the multi-carrier system replaced it. The old `app_meta` round keys are
+ * removed for the same reason and are never read again.
+ *
+ * Runs once per instance, before any query that touches the table. A failed
+ * attempt clears the cached promise so the next call retries.
+ */
+function ensureCarrySchema(): Promise<void> {
+  if (carrySchemaReady) return carrySchemaReady;
+
+  carrySchemaReady = (async () => {
+    const columns = await db().execute("PRAGMA table_info(carry_signups)");
+    const hasRoomId = columns.rows.some((row) => row.name === "room_id");
+    const isOldShape = columns.rows.length > 0 && !hasRoomId;
+
+    await db().batch(
+      [
+        ...(isOldShape ? [{ sql: "DROP TABLE carry_signups" }] : []),
+        {
+          sql: `CREATE TABLE IF NOT EXISTS carry_signups (
+                  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+                  room_id   INTEGER NOT NULL,
+                  name      TEXT NOT NULL UNIQUE,
+                  note      TEXT,
+                  signed_at INTEGER NOT NULL
+                )`,
+        },
+        {
+          sql: "CREATE INDEX IF NOT EXISTS carry_signups_by_room ON carry_signups(room_id, signed_at, seq)",
+        },
+        {
+          sql: "DELETE FROM app_meta WHERE key IN ('carry_signups_open', 'carry_signups_target')",
+        },
+      ],
+      "write"
+    );
+  })().catch((error: unknown) => {
+    carrySchemaReady = null;
+    throw error;
+  });
+
+  return carrySchemaReady;
+}
+
 /* -------------------------------------------------------------------- reads */
 
 type MemberRow = {
@@ -355,6 +452,34 @@ type AttendanceRowShape = {
   status: string;
   note: string | null;
   submitted_at: number;
+};
+
+type CarryRoomShape = {
+  id: number;
+  carrier_name: string;
+  title: string;
+  pin_hash: string;
+  auth_version: number;
+  open: number;
+  created_at: number;
+};
+
+/** Server-side room row. The PIN hash and auth version never reach the client. */
+export interface CarryRoomRecord extends CarryRoom {
+  pinHash: string;
+  authVersion: number;
+}
+
+type CarrySignupShape = {
+  room_id: number;
+  name: string;
+  note: string | null;
+  signed_at: number;
+};
+
+type CarrySignupLocationShape = CarrySignupShape & {
+  room_title: string;
+  carrier_name: string;
 };
 
 type PartyRow = {
@@ -386,6 +511,42 @@ function toAttendanceRow(row: AttendanceRowShape): AttendanceRow | null {
     status: row.status as AttendanceStatus,
     note: row.note || undefined,
     submittedAt: Number(row.submitted_at) || 0,
+  };
+}
+
+function toCarryRoom(row: CarryRoomShape | undefined): CarryRoomRecord | null {
+  if (!row) return null;
+  const id = Number(row.id);
+  if (!Number.isFinite(id)) return null;
+  return {
+    id,
+    carrierName: row.carrier_name,
+    title: row.title,
+    open: Number(row.open) === 1,
+    createdAt: Number(row.created_at) || 0,
+    pinHash: row.pin_hash,
+    authVersion: Number(row.auth_version) || 1,
+  };
+}
+
+/** Strips the server-only fields before a room is put in a response. */
+export function toPublicCarryRoom(room: CarryRoomRecord): CarryRoom {
+  return {
+    id: room.id,
+    carrierName: room.carrierName,
+    title: room.title,
+    open: room.open,
+    createdAt: room.createdAt,
+  };
+}
+
+function toCarrySignup(row: CarrySignupShape): CarrySignup | null {
+  if (!row.name) return null;
+  return {
+    roomId: Number(row.room_id) || 0,
+    name: row.name,
+    note: row.note || undefined,
+    signedAt: Number(row.signed_at) || 0,
   };
 }
 
@@ -572,6 +733,194 @@ export async function readMembers(): Promise<Member[]> {
   return rows.flat().map((row) => toMember(row as unknown as MemberRow));
 }
 
+/**
+ * Every room, every queue entry, and the roster to pick from, in one batch.
+ *
+ * The sign-up join drops a name that has left the roster. `deleteMember` and
+ * `syncMembers` clean those rows up in the same transaction as the member, but
+ * a database edited by hand may still hold one; hiding it beats showing a name
+ * nobody can look up or remove from this page.
+ *
+ * Queues are ordered by `signedAt` then `seq`; a transfer refreshes `signedAt`
+ * so the member lands at the back of the destination queue.
+ */
+export async function readCarryBoard(): Promise<{
+  rooms: CarryRoomRecord[];
+  signups: CarrySignup[];
+  members: Member[];
+}> {
+  const [roomRows, signupRows, memberRows] = await run([
+    {
+      sql: `SELECT id, carrier_name, title, pin_hash, auth_version, open, created_at
+              FROM carry_rooms
+             ORDER BY created_at, id`,
+    },
+    {
+      sql: `SELECT s.room_id, s.name, s.note, s.signed_at
+              FROM carry_signups s
+              JOIN members m ON m.name = s.name
+             ORDER BY s.signed_at, s.seq`,
+    },
+    { sql: "SELECT name, job, level, note FROM members ORDER BY position, name" },
+  ]);
+
+  return {
+    rooms: roomRows
+      .flat()
+      .map((row) => toCarryRoom(row as unknown as CarryRoomShape))
+      .filter((row): row is CarryRoomRecord => row !== null),
+    signups: signupRows
+      .flat()
+      .map((row) => toCarrySignup(row as unknown as CarrySignupShape))
+      .filter((row): row is CarrySignup => row !== null),
+    members: memberRows.flat().map((row) => toMember(row as unknown as MemberRow)),
+  };
+}
+
+/** One room, including its server-only PIN hash and auth version. */
+export async function readCarryRoom(
+  id: number
+): Promise<CarryRoomRecord | null> {
+  const [rows] = await run([
+    {
+      sql: `SELECT id, carrier_name, title, pin_hash, auth_version, open, created_at
+              FROM carry_rooms WHERE id = ?`,
+      args: [id],
+    },
+  ]);
+  return toCarryRoom(rows.flat()[0] as unknown as CarryRoomShape);
+}
+
+/**
+ * Creates a room and returns its stored row, or `null` when the board is full.
+ *
+ * The cap is part of the INSERT rather than a separate COUNT + INSERT: two
+ * people tapping "สร้างห้องแบก" at the same time must not both squeeze past the
+ * limit. The outer `WHERE` sees the count at the moment SQLite writes the row.
+ * The caller sets the session for the returned room.
+ */
+export async function createCarryRoom(input: {
+  carrierName: string;
+  title: string;
+  pinHash: string;
+}): Promise<CarryRoomRecord | null> {
+  const [rows] = await run([
+    {
+      sql: `INSERT INTO carry_rooms
+              (carrier_name, title, pin_hash, auth_version, open, created_at)
+            SELECT ?, ?, ?, 1, 1, ?
+             WHERE (SELECT COUNT(*) FROM carry_rooms) < ?
+            RETURNING id`,
+      args: [
+        input.carrierName,
+        input.title,
+        input.pinHash,
+        Date.now(),
+        CARRY_ROOM_LIMIT,
+      ],
+    },
+  ]);
+
+  const id = Number((rows.flat()[0] as unknown as { id: number } | undefined)?.id);
+  if (!Number.isFinite(id)) return null;
+
+  const room = await readCarryRoom(id);
+  if (!room) throw new Error("carry_rooms row disappeared after insert");
+  return room;
+}
+
+/**
+ * Updates the mutable parts of a room in one statement.
+ *
+ * `pinHash` is the only field that also bumps `auth_version`; changing a title
+ * or the open flag must not log the carrier out. The caller re-reads the room
+ * so it can hand the new auth version to `setRoomSession` after a PIN change.
+ */
+export async function updateCarryRoom(
+  id: number,
+  patch: { title?: string; open?: boolean; pinHash?: string }
+): Promise<void> {
+  const sets: string[] = [];
+  const args: Array<string | number> = [];
+
+  if (patch.title !== undefined) {
+    sets.push("title = ?");
+    args.push(patch.title);
+  }
+  if (patch.open !== undefined) {
+    sets.push("open = ?");
+    args.push(patch.open ? 1 : 0);
+  }
+  if (patch.pinHash !== undefined) {
+    sets.push("pin_hash = ?", "auth_version = auth_version + 1");
+    args.push(patch.pinHash);
+  }
+
+  if (sets.length === 0) return;
+
+  await run([
+    {
+      sql: `UPDATE carry_rooms SET ${sets.join(", ")} WHERE id = ?`,
+      args: [...args, id],
+    },
+  ]);
+}
+
+/**
+ * Deletes an empty room. A non-empty room throws with the queue size so the
+ * route can tell the carrier how many people are still there.
+ */
+export async function deleteCarryRoom(id: number): Promise<void> {
+  const [deleted] = await run([
+    {
+      sql: `DELETE FROM carry_rooms
+             WHERE id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM carry_signups WHERE room_id = ?
+               )
+            RETURNING id`,
+      args: [id, id],
+    },
+  ]);
+  if (deleted.flat().length) return;
+
+  const [countRows] = await run([
+    {
+      sql: "SELECT COUNT(*) AS count FROM carry_signups WHERE room_id = ?",
+      args: [id],
+    },
+  ]);
+  const count = Number(
+    (countRows.flat()[0] as unknown as { count: number } | undefined)?.count
+  );
+  throw new CarryRoomNotEmptyError(Number.isFinite(count) ? count : 0);
+}
+
+/** Where a name is already queued, or null when the name is free. */
+export async function readCarryQueueLocation(
+  name: string
+): Promise<CarryQueueLocation | null> {
+  const [rows] = await run([
+    {
+      sql: `SELECT s.room_id, s.name, s.note, s.signed_at,
+                   r.title AS room_title, r.carrier_name
+              FROM carry_signups s
+              JOIN carry_rooms r ON r.id = s.room_id
+             WHERE s.name = ?`,
+      args: [name],
+    },
+  ]);
+
+  const row = rows.flat()[0] as unknown as CarrySignupLocationShape | undefined;
+  if (!row) return null;
+
+  return {
+    roomId: Number(row.room_id) || 0,
+    roomTitle: row.room_title,
+    carrierName: row.carrier_name,
+  };
+}
+
 /** Every box/row of every event, in board order. */
 async function readEventRows(): Promise<EventRow[]> {
   const [rows] = await run([
@@ -658,6 +1007,189 @@ export async function appendAttendance(row: AttendanceRow): Promise<void> {
       args: [row.name, row.date, row.status, row.note ?? null, row.submittedAt],
     },
   ]);
+}
+
+/** Why a sign-up did not add a row. */
+export type CarrySignupResult =
+  | { kind: "added" }
+  | { kind: "not-member" }
+  | { kind: "room-missing" }
+  | { kind: "room-closed" }
+  | { kind: "existing"; location: CarryQueueLocation };
+
+/**
+ * Adds one name to one room's queue.
+ *
+ * Open like attendance, but the name still has to be on the roster and may sit
+ * in only one queue at a time. The checks and the insert are separate round
+ * trips: a racing second tap is caught by the UNIQUE `name` constraint and
+ * `INSERT OR IGNORE`, then reported as "already" with the room it landed in.
+ * The first sign-up keeps its note; a second tap cannot rewrite it.
+ *
+ * The room's open/closed switch is checked before the insert. Like the
+ * membership check this is a read before the write, so a member can slip in
+ * between a carrier closing the room and this call reading it — the window is
+ * one round trip and the cost is a queue entry the carrier can remove.
+ */
+export async function signUpForCarry(
+  roomId: number,
+  name: string,
+  note?: string
+): Promise<CarrySignupResult> {
+  const [memberRows, roomRows] = await run([
+    { sql: "SELECT 1 AS found FROM members WHERE name = ?", args: [name] },
+    { sql: "SELECT id, open FROM carry_rooms WHERE id = ?", args: [roomId] },
+  ]);
+
+  if (!memberRows.flat().length) return { kind: "not-member" };
+
+  const room = roomRows.flat()[0] as unknown as
+    | { id: number; open: number }
+    | undefined;
+  if (!room) return { kind: "room-missing" };
+
+  const existing = await readCarryQueueLocation(name);
+  if (existing) return { kind: "existing", location: existing };
+
+  if (Number(room.open) !== 1) return { kind: "room-closed" };
+
+  // The insert re-checks the room in the same statement. Deleting a room runs
+  // a `NOT EXISTS` check in its own statement, so this closes the window where
+  // a room is deleted between the read above and the write below: one of the
+  // two writes commits first, and the other sees it.
+  const [inserted] = await run([
+    {
+      sql: `INSERT OR IGNORE INTO carry_signups (room_id, name, note, signed_at)
+            SELECT id, ?, ?, ? FROM carry_rooms
+             WHERE id = ? AND open = 1
+            RETURNING seq`,
+      args: [name, note ?? null, Date.now(), roomId],
+    },
+  ]);
+
+  if (inserted.flat().length > 0) return { kind: "added" };
+
+  // A concurrent tap won the UNIQUE race between the read and this insert.
+  const raced = await readCarryQueueLocation(name);
+  if (raced) return { kind: "existing", location: raced };
+
+  // The room was deleted or closed after the read above. Re-read it so the
+  // caller gets the reason that actually applies now.
+  const current = await readCarryRoom(roomId);
+  if (!current) return { kind: "room-missing" };
+  if (!current.open) return { kind: "room-closed" };
+
+  // An INSERT ... SELECT that matched a room and did not conflict must insert.
+  // Reaching here means an orphan row with this UNIQUE name exists, which no
+  // write path in this file can create; fail loudly instead of claiming success.
+  throw new Error("carry sign-up was ignored without a conflict");
+}
+
+/** Replaces one row's note inside a room. Returns false when the row is gone. */
+export async function updateCarrySignupNote(
+  roomId: number,
+  name: string,
+  note?: string
+): Promise<boolean> {
+  const [rows] = await run([
+    {
+      sql: `UPDATE carry_signups SET note = ?
+             WHERE room_id = ? AND name = ?
+            RETURNING name`,
+      args: [note ?? null, roomId, name],
+    },
+  ]);
+  return rows.flat().length > 0;
+}
+
+/** Removes one row from a room. Returns false when it was not there. */
+export async function deleteCarrySignup(
+  roomId: number,
+  name: string
+): Promise<boolean> {
+  const [rows] = await run([
+    {
+      sql: "DELETE FROM carry_signups WHERE room_id = ? AND name = ? RETURNING name",
+      args: [roomId, name],
+    },
+  ]);
+  return rows.flat().length > 0;
+}
+
+/** Empties one room's queue and returns how many rows were removed. */
+export async function clearCarryRoomSignups(roomId: number): Promise<number> {
+  const [rows] = await run([
+    {
+      sql: "DELETE FROM carry_signups WHERE room_id = ? RETURNING name",
+      args: [roomId],
+    },
+  ]);
+  return rows.flat().length;
+}
+
+/**
+ * Moves one member between rooms.
+ *
+ * Updates `room_id` and refreshes `signed_at` in one statement, so the member
+ * appears at the end of the destination queue and the move is atomic. The
+ * statement also re-checks that the destination is still open; deleting a room
+ * and closing it are separate writes, and the two must not overwrite each other.
+ * A missing result means the source row is gone, or the destination changed
+ * between the route's read and this write.
+ */
+export async function transferCarrySignup(
+  fromRoomId: number,
+  toRoomId: number,
+  name: string
+): Promise<"moved" | "missing"> {
+  const [rows] = await run([
+    {
+      sql: `UPDATE carry_signups SET room_id = ?, signed_at = ?
+             WHERE room_id = ? AND name = ?
+               AND EXISTS (
+                 SELECT 1 FROM carry_rooms WHERE id = ? AND open = 1
+               )
+            RETURNING name`,
+      args: [toRoomId, Date.now(), fromRoomId, name, toRoomId],
+    },
+  ]);
+  return rows.flat().length > 0 ? "moved" : "missing";
+}
+
+/**
+ * Moves an entire queue to another room and returns how many names moved.
+ *
+ * `ROW_NUMBER()` follows the source queue order (`signed_at, seq`) and gives
+ * each moved row a distinct timestamp, so the destination keeps the same
+ * order instead of falling back to insertion order. The `EXISTS` check is the
+ * same guard as the single-name move: a target that closed or disappeared
+ * between the route's read and this write leaves every row untouched.
+ */
+export async function transferAllCarrySignups(
+  fromRoomId: number,
+  toRoomId: number
+): Promise<number> {
+  const [rows] = await run([
+    {
+      sql: `WITH ordered AS (
+              SELECT seq, ROW_NUMBER() OVER (ORDER BY signed_at, seq) - 1 AS rn
+                FROM carry_signups
+               WHERE room_id = ?
+            )
+            UPDATE carry_signups
+               SET room_id = ?,
+                   signed_at = ? + (
+                     SELECT rn FROM ordered WHERE ordered.seq = carry_signups.seq
+                   )
+             WHERE room_id = ?
+               AND EXISTS (
+                 SELECT 1 FROM carry_rooms WHERE id = ? AND open = 1
+               )
+            RETURNING name`,
+      args: [fromRoomId, toRoomId, Date.now(), fromRoomId, toRoomId],
+    },
+  ]);
+  return rows.flat().length;
 }
 
 /**
@@ -987,6 +1519,7 @@ export async function syncMembers(members: Member[]): Promise<MemberImportSummar
     // Ledger first, then the roster row: a name with attendance behind it and
     // no roster row is exactly the row nobody can explain or count later.
     statements.push(
+      { sql: `DELETE FROM carry_signups WHERE ${inList(removed)}`, args: removed },
       { sql: `DELETE FROM attendance WHERE ${inList(removed)}`, args: removed },
       { sql: `DELETE FROM members WHERE ${inList(removed)}`, args: removed },
     );
@@ -1061,8 +1594,8 @@ function inListOf(column: string, values: string[]): string {
 
 /**
  * Deletes a member for good — the roster row, every attendance row for that
- * name, and every team they were standing in. The only way a member leaves the
- * guild now: there is no archiving, and no undo.
+ * name, every carry sign-up, and every team they were standing in. The only way
+ * a member leaves the guild now: there is no archiving, and no undo.
  *
  * The teams are part of the same batch rather than a follow-up call. A name off
  * the roster but still in a team shows on the board as a blank icon reading
@@ -1088,6 +1621,7 @@ export async function deleteMember(name: string): Promise<MemberDeleteSummary> {
       sql: "SELECT COUNT(DISTINCT party_id) AS n FROM party_members WHERE member_name = ?",
       args: [name],
     },
+    { sql: "DELETE FROM carry_signups WHERE name = ?", args: [name] },
     { sql: "DELETE FROM attendance WHERE name = ?", args: [name] },
     { sql: "DELETE FROM members WHERE name = ?", args: [name] },
     { sql: "DELETE FROM party_members WHERE member_name = ?", args: [name] },

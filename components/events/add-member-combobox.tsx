@@ -1,7 +1,6 @@
 "use client"
 
 import * as React from "react"
-import { Combobox as ComboboxPrimitive } from "@base-ui/react"
 import {
   Combobox,
   ComboboxEmpty,
@@ -9,7 +8,7 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox"
-import { usePortalContainer } from "@/components/portal-container"
+import { DialogComboboxPopup } from "@/components/combobox-popup"
 import { useMemberPlacement } from "@/components/member-placement"
 import { GameIcon } from "@/components/game-icon"
 import { StatusBadge } from "@/components/leave/roster-list"
@@ -98,7 +97,7 @@ export function AddMemberCombobox({
         showClear
         className="[&_[data-slot=combobox-clear]]:size-8 sm:[&_[data-slot=combobox-clear]]:size-6"
       />
-      <MemberComboboxPopup>
+      <DialogComboboxPopup>
         <ComboboxEmpty>ไม่พบชื่อนี้ในรายชื่อสมาชิก</ComboboxEmpty>
         <ComboboxList>
           {(member) => {
@@ -118,40 +117,7 @@ export function AddMemberCombobox({
             )
           }}
         </ComboboxList>
-      </MemberComboboxPopup>
+      </DialogComboboxPopup>
     </Combobox>
-  )
-}
-
-/**
- * The combobox popup, portaled where a scroll lock will not reach it.
- *
- * This mirrors shadcn's `ComboboxContent` (see `components/ui/combobox.tsx`),
- * with one difference: the portal target comes from `usePortalContainer()` so
- * the popup can mount *inside* a Radix dialog. Handing `container` to Base UI's
- * `ComboboxPortal` is the documented fix for the Base UI × Radix interop gap;
- * shadcn's own `ComboboxContent` has no such prop, which is why this wrapper
- * exists at all. Outside a dialog the context is null and the popup falls back
- * to `<body>`, exactly like the CLI component.
- */
-function MemberComboboxPopup({ children }: { children: React.ReactNode }) {
-  const container = usePortalContainer()
-
-  return (
-    <ComboboxPrimitive.Portal container={container ?? undefined}>
-      <ComboboxPrimitive.Positioner
-        side="bottom"
-        sideOffset={6}
-        align="start"
-        className="isolate z-50"
-      >
-        <ComboboxPrimitive.Popup
-          data-slot="combobox-content"
-          className="group/combobox-content relative max-h-(--available-height) w-(--anchor-width) max-w-(--available-width) min-w-[calc(var(--anchor-width)+--spacing(7))] origin-(--transform-origin) overflow-hidden rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95"
-        >
-          {children}
-        </ComboboxPrimitive.Popup>
-      </ComboboxPrimitive.Positioner>
-    </ComboboxPrimitive.Portal>
   )
 }

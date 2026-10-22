@@ -22,6 +22,7 @@ export const SITE_NAME = "กิลด์";
  */
 export const NAV_ITEMS = [
   { href: "/", label: "เช็คชื่อ", title: "เช็คชื่อ" },
+  { href: "/carry-signup", label: "ลงชื่อแบกดัน", title: "ลงชื่อแบกดัน" },
   { href: "/guild-war", label: "Guild War", title: "Guild War" },
   { href: "/guild-league", label: "Guild League", title: "Guild League" },
   { href: "/polarity", label: "Polarity", title: "Polarity" },
