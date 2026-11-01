@@ -1,7 +1,7 @@
 /**
  * Ragnarok: New World class catalog.
  *
- * 13 jobs, and the **name is the identifier** — `Member.job` stores the name
+ * 15 jobs, and the **name is the identifier** — `Member.job` stores the name
  * itself, so what is in the database reads as "Paladin" rather than 222. That
  * is the whole point: the roster is looked at and hand-edited by people, and a
  * number tells nobody anything.
@@ -21,6 +21,11 @@
  * its high-class entry is shown as "Druid", not its own name. The id survives
  * only inside `iconKey`, which is the asset filename that `jobIconUrl()` turns
  * into a path.
+ *
+ * Sage and Rogue are the other exception: the roster keeps their second-class
+ * names even though their art is the high-class icon (`323` / `623`, the
+ * "Scholar" / "Stalker" art). The name is what the guild calls them; the icon
+ * follows the same `…3` rule as every other entry.
  *
  * There are no build branches any more. The high class does not split into
  * them, so a member is fully described by their job alone.
@@ -59,6 +64,11 @@ export const JOBS: Job[] = [
     iconKey: "icon_jsxq_big_313",
   },
   {
+    name: "Sage",
+    nameEn: "Sage",
+    iconKey: "icon_jsxq_big_323",
+  },
+  {
     name: "Sniper",
     nameEn: "Sniper",
     iconKey: "icon_jsxq_big_413",
@@ -87,6 +97,11 @@ export const JOBS: Job[] = [
     name: "Assassin Cross",
     nameEn: "Assassin Cross",
     iconKey: "icon_jsxq_big_613",
+  },
+  {
+    name: "Rogue",
+    nameEn: "Rogue",
+    iconKey: "icon_jsxq_big_623",
   },
   {
     name: "Whitesmith",

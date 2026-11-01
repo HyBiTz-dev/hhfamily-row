@@ -33,11 +33,12 @@ const COLUMNS = { name: "Player", level: "Lv.", job: "Class" } as const;
 /**
  * Class names the game export writes that this app stores under another name.
  *
- * The export prints the translated branch of two classes — Alithea is the
- * Druid line, Night Watch is the Night Walker line — while the guild calls them
- * Druid and Night Walker. These are the names `jobs.ts` holds and the names the
- * roster shows, so the file is translated on the way in rather than the app
- * carrying two spellings of the same class.
+ * The export prints the translated branch of four classes — Alithea is the
+ * Druid line, Night Watch is the Night Walker line, Scholar is the Sage line
+ * and Stalker is the Rogue line — while the guild calls them Druid, Night
+ * Walker, Sage and Rogue. These are the names `jobs.ts` holds and the names
+ * the roster shows, so the file is translated on the way in rather than the
+ * app carrying two spellings of the same class.
  *
  * Not aliases in `JOBS`: a class that answers to two names is a class whose
  * name can drift again, and `isJobName()` is meant to be the one gate.
@@ -45,6 +46,8 @@ const COLUMNS = { name: "Player", level: "Lv.", job: "Class" } as const;
 const EXPORT_JOB_NAMES: Record<string, string> = {
   Alithea: "Druid",
   "Night Watch": "Night Walker",
+  Scholar: "Sage",
+  Stalker: "Rogue",
 };
 
 /**
