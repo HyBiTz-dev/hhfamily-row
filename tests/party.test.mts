@@ -24,7 +24,7 @@ import {
 
 function placed(overrides: Partial<PartyPlacement> = {}): PartyPlacement {
   return {
-    event: "guild-war",
+    event: "siege",
     division: "",
     rowId: null,
     position: 0,
@@ -46,7 +46,7 @@ function party(overrides: Partial<Party> = {}): Party {
 function row(overrides: Partial<EventRow> = {}): EventRow {
   return {
     id: "r1",
-    event: "guild-war",
+    event: "siege",
     division: "",
     name: "กล่อง",
     position: 0,
@@ -95,7 +95,7 @@ describe("swapMemberSeats", () => {
 /* ------------------------------------------------------- label chips */
 
 describe("togglePartyLabel", () => {
-  const war = partyLabelOptions().find((option) => option.id === "guild-war")!;
+  const war = partyLabelOptions().find((option) => option.id === "siege")!;
   const upper = partyLabelOptions().find(
     (option) => option.id === "guild-league:upper"
   )!;
@@ -146,7 +146,7 @@ describe("togglePartyLabel", () => {
 
   test("unticking one event keeps every other event untouched", () => {
     const current = [
-      placed({ event: "polarity", rowId: "polarity-box" }),
+      placed({ event: "guild-league", division: "upper", rowId: "upper-box" }),
       placed({ rowId: "war-box" }),
     ];
     const next = togglePartyLabel(current, war);
@@ -173,8 +173,8 @@ describe("parseParties", () => {
           id: "p1",
           name: "ทีม",
           placements: [
-            { event: "guild-war", rowId: "first", position: 1 },
-            { event: "guild-war", rowId: "second", position: 2 },
+            { event: "siege", rowId: "first", position: 1 },
+            { event: "siege", rowId: "second", position: 2 },
           ],
         },
       ])
@@ -182,7 +182,7 @@ describe("parseParties", () => {
 
     assert.deepEqual(parsed.placements, [
       {
-        event: "guild-war",
+        event: "siege",
         division: "",
         rowId: "second",
         position: 2,
@@ -198,7 +198,7 @@ describe("parseParties", () => {
           name: "ทีม",
           placements: [
             { event: "boss", division: "" },
-            { event: "guild-war", division: "upper" },
+            { event: "siege", division: "upper" },
             { event: "guild-league", division: "middle" },
             { event: "guild-league", division: "" },
             { event: "guild-league", division: "upper" },
@@ -210,7 +210,7 @@ describe("parseParties", () => {
 
     assert.deepEqual(
       parsed.placements.map((placement) => placement.event),
-      ["guild-league", "polarity"]
+      ["guild-league"]
     );
     assert.deepEqual(parsed.placements[0], {
       event: "guild-league",
@@ -248,8 +248,8 @@ describe("parseParties", () => {
           id: "p1",
           name: "ทีม",
           placements: [
-            { event: "guild-war", rowId: "", position: Number.NaN },
-            { event: "polarity", rowId: 42, position: "first" },
+            { event: "siege", rowId: "", position: Number.NaN },
+            { event: "guild-league", division: "lower", rowId: 42, position: "first" },
           ],
         },
       ])
@@ -269,19 +269,19 @@ describe("parseEventRows", () => {
     assert.deepEqual(parseEventRows("nope"), []);
     assert.deepEqual(parseEventRows("{}"), []);
     assert.deepEqual(parseEventRows("[null, 2, {}]"), []);
-    assert.deepEqual(parseEventRows('[{"id":"r1","event":"guild-war"}]'), []);
+    assert.deepEqual(parseEventRows('[{"id":"r1","event":"siege"}]'), []);
   });
 
   test("trims the name and defaults a missing position", () => {
     const [parsed] = parseEventRows(
       JSON.stringify([
-        { id: "r1", event: "guild-war", division: "", name: "  ทีมสเกา  " },
+        { id: "r1", event: "siege", division: "", name: "  ทีมสเกา  " },
       ])
     );
 
     assert.deepEqual(parsed, {
       id: "r1",
-      event: "guild-war",
+      event: "siege",
       division: "",
       name: "ทีมสเกา",
       position: 0,
@@ -292,9 +292,9 @@ describe("parseEventRows", () => {
     assert.deepEqual(
       parseEventRows(
         JSON.stringify([
-          { id: "blank", event: "guild-war", name: "   " },
+          { id: "blank", event: "siege", name: "   " },
           { id: "boss", event: "boss", name: "กล่อง" },
-          { id: "war-div", event: "guild-war", division: "upper", name: "กล่อง" },
+          { id: "war-div", event: "siege", division: "upper", name: "กล่อง" },
           { id: "league-empty", event: "guild-league", division: "", name: "กล่อง" },
           { id: "league-bad", event: "guild-league", division: "middle", name: "กล่อง" },
           { id: "league-ok", event: "guild-league", division: "upper", name: "กล่อง" },
@@ -307,8 +307,8 @@ describe("parseEventRows", () => {
   test("does not dedupe: that is the write gate's job", () => {
     const rows = parseEventRows(
       JSON.stringify([
-        { id: "same", event: "guild-war", name: "A", position: 1 },
-        { id: "same", event: "guild-war", name: "A", position: 2 },
+        { id: "same", event: "siege", name: "A", position: 1 },
+        { id: "same", event: "siege", name: "A", position: 2 },
       ])
     );
 
@@ -333,7 +333,7 @@ describe("dedupeEventRows", () => {
     const { rows, remap } = dedupeEventRows([
       row({ id: "a", name: "ทีม A" }),
       row({ id: "b", name: " ทีม a " }),
-      row({ id: "c", event: "polarity", name: "ทีม A" }),
+      row({ id: "c", event: "guild-league", division: "lower", name: "ทีม A" }),
     ]);
 
     assert.deepEqual(rows.map((entry) => entry.id), ["a", "c"]);
@@ -354,22 +354,20 @@ describe("dedupeEventRows", () => {
 
 describe("normalizePlacements", () => {
   const rows = [
-    row({ id: "war-box", event: "guild-war", division: "", name: "วอร์" }),
+    row({ id: "war-box", event: "siege", division: "", name: "วอร์" }),
     row({ id: "upper-box", event: "guild-league", division: "upper", name: "บน" }),
-    row({ id: "polarity-box", event: "polarity", division: "", name: "โพล" }),
   ];
 
-  test("drops a row that belongs to another event and follows a remap", () => {
+  test("drops a row that belongs to another event", () => {
     const next = normalizePlacements(
       party({
         placements: [
-          placed({ event: "guild-war", rowId: "upper-box" }),
+          placed({ event: "siege", rowId: "upper-box" }),
           placed({
             event: "guild-league",
             division: "upper",
             rowId: "upper-box",
           }),
-          placed({ event: "polarity", rowId: "dropped-box" }),
         ],
       }),
       rows,
@@ -377,10 +375,8 @@ describe("normalizePlacements", () => {
     );
     const byEvent = new Map(next.map((entry) => [entry.event, entry]));
 
-    assert.equal(byEvent.get("guild-war")?.rowId, null);
+    assert.equal(byEvent.get("siege")?.rowId, null);
     assert.equal(byEvent.get("guild-league")?.rowId, "upper-box");
-    // The remap points at a Guild War row, which cannot hold a Polarity team.
-    assert.equal(byEvent.get("polarity")?.rowId, null);
   });
 
   test("can follow a chained remap without looping", () => {
@@ -402,7 +398,7 @@ describe("normalizePlacements", () => {
     const [next] = normalizePlacements(
       party({
         placements: [
-          placed({ event: "guild-war", division: "upper", rowId: "war-box" }),
+          placed({ event: "siege", division: "upper", rowId: "war-box" }),
         ],
       }),
       rows,
@@ -410,7 +406,7 @@ describe("normalizePlacements", () => {
     );
 
     assert.deepEqual(next, {
-      event: "guild-war",
+      event: "siege",
       division: "",
       rowId: "war-box",
       position: 0,
@@ -423,22 +419,23 @@ describe("normalizePlacements", () => {
         placements: [
           placed({ event: "boss" as EventCategoryId }),
           placed({ event: "guild-league", division: "middle" }),
-          placed({ event: "polarity", rowId: null }),
+          placed({ event: "polarity" as EventCategoryId, rowId: null }),
+          placed({ event: "siege", rowId: "war-box" }),
         ],
       }),
       rows,
       new Map()
     );
 
-    assert.deepEqual(next.map((entry) => entry.event), ["polarity"]);
+    assert.deepEqual(next.map((entry) => entry.event), ["siege"]);
   });
 
   test("keeps one placement per event, the last one winning", () => {
     const next = normalizePlacements(
       party({
         placements: [
-          placed({ event: "guild-war", rowId: "war-box" }),
-          placed({ event: "guild-war", rowId: null }),
+          placed({ event: "siege", rowId: "war-box" }),
+          placed({ event: "siege", rowId: null }),
         ],
       }),
       rows,
@@ -522,12 +519,7 @@ describe("planRandomParties", () => {
     );
     assert.ok(
       plan.parties.every((entry) =>
-        entry.placements.some((placement) => placement.event === "guild-war")
-      )
-    );
-    assert.ok(
-      plan.parties.every((entry) =>
-        entry.placements.some((placement) => placement.event === "polarity")
+        entry.placements.some((placement) => placement.event === "siege")
       )
     );
   });

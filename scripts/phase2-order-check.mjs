@@ -120,7 +120,7 @@ const put = async (parties) => {
 
 /** First named box that holds at least two teams, with the scope's lane order. */
 function pickBox(parties, eventRows) {
-  for (const event of ["guild-war", "polarity", "guild-league"]) {
+  for (const event of ["siege", "guild-league"]) {
     const divisions = event === "guild-league" ? ["upper", "lower"] : [""];
     for (const division of divisions) {
       const rows = eventRows
@@ -157,7 +157,7 @@ function pickBox(parties, eventRows) {
   // the fallback for a database seeded another way.
   let picked = pickBox(before, eventRows);
   if (!picked) {
-    const row = eventRows.find((entry) => entry.event === "guild-war") ?? eventRows[0];
+    const row = eventRows.find((entry) => entry.event === "siege") ?? eventRows[0];
     if (row) {
       await put([
         ...before,

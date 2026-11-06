@@ -48,7 +48,7 @@ export function PartyLabelChips({
               aria-pressed={activeIds.includes(option.id)}
               // Multi-select: a fixed team can play several events, so a tap
               // toggles this event's segment and leaves the others — including
-              // a Guild War box — exactly where they were.
+              // a Siege box — exactly where they were.
               onClick={() => onChange(togglePartyLabel(placements, option))}
             >
               {option.label}

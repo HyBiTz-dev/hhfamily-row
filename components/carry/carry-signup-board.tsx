@@ -80,7 +80,10 @@ export function CarrySignupBoard() {
         const body = await response.json()
         if (!response.ok) throw new Error(body.error ?? "โหลดคิวไม่สำเร็จ")
         if (!cancelled) {
-          setData(body)
+          // `done` is newer than the rest of the payload; a browser holding a
+          // cached response from before the log existed must not crash the
+          // board on `undefined.filter`.
+          setData({ ...body, done: body.done ?? [] })
           setError(null)
         }
       })
@@ -268,7 +271,13 @@ export function CarrySignupBoard() {
         />
       )}
 
-      <div ref={formRef} className="scroll-mt-4">
+      {/*
+        The sign-up form stays a readable column instead of stretching across
+        the 7xl page: three stacked fields at full width put the name box a
+        screen away from the submit button. The room grid below keeps the full
+        width because it is a grid of cards, not a form.
+      */}
+      <div ref={formRef} className="w-full max-w-xl scroll-mt-4">
         <Card>
           <CardHeader>
             <CardTitle>ลงชื่อของฉัน</CardTitle>
@@ -316,6 +325,7 @@ export function CarrySignupBoard() {
                 key={room.id}
                 room={room}
                 signups={data.signups}
+                done={data.done}
                 members={data.members}
                 authorized={authorizedRoomIds.has(room.id)}
                 otherOpenRooms={openRooms.filter(

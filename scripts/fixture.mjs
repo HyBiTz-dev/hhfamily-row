@@ -16,9 +16,9 @@
  *
  * Shape of the fixture, because the checks rely on it:
  *
- *   - guild-war has two boxes, "ทีม1" with two teams (drag/reorder needs a pair)
+ *   - siege has two boxes, "ทีม1" with two teams (drag/reorder needs a pair)
  *     and "ทีม2" with one.
- *   - "ทีม1" also plays polarity and ลีคหลัก, so "the other event keeps its
+ *   - "ทีม1" also plays ลีคหลัก, so "the other event keeps its
  *     position" has a team to check.
  *   - every team has 2 members, all in valid jobs, so cards render without the
  *     "นอกรายชื่อ" fallback.
@@ -40,9 +40,8 @@ const MEMBERS = [
 ];
 
 const ROWS = [
-  ["fx-war-a", "guild-war", "", "ทีม1", 0],
-  ["fx-war-b", "guild-war", "", "ทีม2", 1],
-  ["fx-pol-a", "polarity", "", "โพลา A", 0],
+  ["fx-war-a", "siege", "", "ทีม1", 0],
+  ["fx-war-b", "siege", "", "ทีม2", 1],
   ["fx-upper-mid", "guild-league", "upper", "เลนกลาง", 0],
   ["fx-lower-b", "guild-league", "lower", "กลุ่ม B", 0],
 ];
@@ -53,8 +52,7 @@ const PARTIES = [
     name: "ทีม1",
     members: ["Test Healer", "Test Tank"],
     placements: [
-      ["guild-war", "", "fx-war-a", 0],
-      ["polarity", "", "fx-pol-a", 0],
+      ["siege", "", "fx-war-a", 0],
       ["guild-league", "upper", "fx-upper-mid", 0],
     ],
   },
@@ -63,7 +61,7 @@ const PARTIES = [
     name: "ทีม2",
     members: ["Test Mage", "Test Archer"],
     placements: [
-      ["guild-war", "", "fx-war-a", 1],
+      ["siege", "", "fx-war-a", 1],
       ["guild-league", "upper", "fx-upper-mid", 1],
     ],
   },
@@ -72,7 +70,7 @@ const PARTIES = [
     name: "ทีม3",
     members: ["Test Bard", "Test Dancer"],
     placements: [
-      ["guild-war", "", "fx-war-b", 2],
+      ["siege", "", "fx-war-b", 2],
       ["guild-league", "lower", "fx-lower-b", 0],
     ],
   },

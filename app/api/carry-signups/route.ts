@@ -15,7 +15,7 @@ import { CARRY_NOTE_MAX_LENGTH } from "@/lib/rngw/types";
 
 export async function GET() {
   try {
-    const { rooms, signups, members } = await readCarryBoard();
+    const { rooms, signups, done, members } = await readCarryBoard();
     const admin = await isAdmin();
     const authorizedRoomIds = admin
       ? rooms.map((room) => room.id)
@@ -24,6 +24,7 @@ export async function GET() {
     return Response.json({
       rooms: rooms.map(toPublicCarryRoom),
       signups,
+      done,
       members,
       authorizedRoomIds,
       isAdmin: admin,

@@ -1,8 +1,10 @@
 import { requireCarryRoomAccess } from "@/lib/carry-auth";
 import {
   clearCarryRoomSignups,
+  completeCarrySignup,
   deleteCarrySignup,
   readCarryRoom,
+  skipCarrySignup,
   transferAllCarrySignups,
   transferCarrySignup,
   updateCarrySignupNote,
@@ -10,11 +12,18 @@ import {
 import { CARRY_NOTE_MAX_LENGTH } from "@/lib/rngw/types";
 
 /**
- * PATCH  /api/carry/rooms/[id]/signups → edit one queue note
+ * PATCH  /api/carry/rooms/[id]/signups → edit one note, or move it to the back
  * DELETE /api/carry/rooms/[id]/signups → remove one name, or clear the queue
- * POST   /api/carry/rooms/[id]/signups → transfer one name or the whole queue
+ * POST   /api/carry/rooms/[id]/signups → mark one name done, or transfer a name
+ *                                        (or the whole queue) to another room
  *
- * All three require the source room's carrier session (or an admin session).
+ * Both moving-to-the-back (`PATCH { action: "skip" }`) and marking done
+ * (`POST { action: "done" }`) are small queue operations that belong to the
+ * source room, so they need the same session as everything else here. "Done"
+ * takes the name out of `carry_signups` and writes a log row in one batch; it is
+ * not a transfer, because the person is finished rather than waiting elsewhere.
+ *
+ * All of them require the source room's carrier session (or an admin session).
  * A transfer targets an *open* room: moving someone into a queue that is not
  * accepting people would be a back door around the closed switch. The source
  * carrier may move a name to another carrier's room; the requirement is
@@ -41,9 +50,31 @@ export async function PATCH(
     return Response.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  const { name, note } = (body ?? {}) as Record<string, unknown>;
+  const { name, note, action } = (body ?? {}) as Record<string, unknown>;
   if (typeof name !== "string" || !name.trim()) {
     return Response.json({ error: "name is required" }, { status: 400 });
+  }
+
+  // Skipping is its own action rather than a note edit, so the two shapes stay
+  // distinguishable: a body with no `note` must never be mistaken for "clear
+  // the note".
+  if (action === "skip") {
+    try {
+      const moved = await skipCarrySignup(room.id, name.trim());
+      if (!moved) {
+        return Response.json(
+          { error: "ไม่พบชื่อนี้ในคิวของห้อง" },
+          { status: 404 }
+        );
+      }
+      return Response.json({ ok: true });
+    } catch (error) {
+      return Response.json({ error: describe(error) }, { status: 502 });
+    }
+  }
+
+  if (action !== undefined) {
+    return Response.json({ error: "ไม่รู้จักคำสั่งนี้" }, { status: 400 });
   }
 
   const trimmedNote = typeof note === "string" ? note.trim() : "";
@@ -142,7 +173,31 @@ export async function POST(
     return Response.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  const { name, toRoomId, all } = (body ?? {}) as Record<string, unknown>;
+  const { name, toRoomId, all, action } = (body ?? {}) as Record<string, unknown>;
+
+  // "Done" leaves the queue but stays in the room's log. It is checked before
+  // the transfer shape because it carries no destination room.
+  if (action === "done") {
+    if (typeof name !== "string" || !name.trim()) {
+      return Response.json({ error: "name is required" }, { status: 400 });
+    }
+    try {
+      const finished = await completeCarrySignup(room.id, name.trim());
+      if (!finished) {
+        return Response.json(
+          { error: "ไม่พบชื่อนี้ในคิวของห้อง — อาจถูกลบหรือย้ายไปแล้ว" },
+          { status: 404 }
+        );
+      }
+      return Response.json({ ok: true });
+    } catch (error) {
+      return Response.json({ error: describe(error) }, { status: 502 });
+    }
+  }
+  if (action !== undefined) {
+    return Response.json({ error: "ไม่รู้จักคำสั่งนี้" }, { status: 400 });
+  }
+
   const movingAll = all === true;
 
   if (!movingAll && (typeof name !== "string" || !name.trim())) {

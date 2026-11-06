@@ -24,7 +24,7 @@ console.log("warnings:", report.warnings.slice(0, 20));
 console.log("\nteams with a null-row league placement:");
 for (const team of report.teams) {
   const league = team.placements.filter((p) => p.event === "guild-league");
-  const war = team.placements.filter((p) => p.event === "guild-war");
+  const war = team.placements.filter((p) => p.event === "siege");
   if (league.some((p) => p.rowId === null)) {
     console.log(`  ${team.name.padEnd(14)} members=${team.memberCount} league=${league.map((p) => `${p.division}:${p.rowName ?? "ว่าง"}`).join(",")} war=${war.map((p) => p.rowName ?? "ว่าง").join(",")}`);
   }

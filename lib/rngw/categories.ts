@@ -2,10 +2,9 @@
  * Guild event categories.
  *
  * A party plays an event by having a placement for it (`Party.placements`), and
- * sits in a stored row (`event_rows`). So /guild-war, /guild-league and
- * /polarity are not separate lists: they are filters over the same parties and
- * rows. That is why the event/division/row vocabulary lives here instead of
- * inside a component.
+ * sits in a stored row (`event_rows`). So /siege and /guild-league are not
+ * separate lists: they are filters over the same parties and rows. That is why
+ * the event/division/row vocabulary lives here instead of inside a component.
  *
  * Nothing here parses a label string any more. The legacy `Party.content`
  * matchers were removed with the one-time migration; `derivePartyContent` only
@@ -33,8 +32,8 @@ export interface EventCategory {
   title: string;
   description: string;
   /**
-   * Splits the event into tabs when set. Guild League has two; Guild War and
-   * Polarity have none, which is what keeps one component serving every page.
+   * Splits the event into tabs when set. Guild League has two; Siege has none,
+   * which is what keeps one component serving every page.
    */
   divisions?: readonly LeagueDivision[];
   // Every event's rows are stored in `event_rows` and named by the guild
@@ -83,9 +82,9 @@ export interface LeagueLane {
 
 const RAW_CATEGORIES = [
   {
-    id: "guild-war",
-    label: "Guild War",
-    title: "Guild War",
+    id: "siege",
+    label: "Siege",
+    title: "Siege",
     description: "ทีมที่หัวหน้ากิลด์จัดไว้ลงสนาม",
   },
   {
@@ -111,12 +110,6 @@ const RAW_CATEGORIES = [
         contentLabel: "Guild League ลีครอง",
       },
     ] satisfies readonly LeagueDivision[],
-  },
-  {
-    id: "polarity",
-    label: "Polarity",
-    title: "Polarity",
-    description: "ทีมที่หัวหน้ากิลด์จัดไว้ลงสนาม",
   },
 ] satisfies readonly EventCategory[];
 
@@ -168,7 +161,7 @@ export function partyRowKey(party: Party, event: EventCategoryId): string {
  * Teams of one scope, in the order the guild master put them in that box.
  *
  * The order is per event: `party_placements.position` is unique per scope, so
- * moving a team up on Guild War does not shuffle the same team on Polarity.
+ * moving a team up on Siege does not shuffle the same team on Guild League.
  * Ties keep the incoming order (which is `parties.position`), because the sort
  * has to stay stable for rows written before the order existed.
  */

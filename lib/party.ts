@@ -76,11 +76,11 @@ export function roleHint(job: string): string | undefined {
  * The event scopes a party's label can name, as tappable chips.
  *
  * A party has no type field, so this is the same vocabulary
- * `lib/rngw/categories.ts` matches against ("Guild War", "Polarity", "Guild
- * League ลีคหลัก/ลีครอง"). The chips exist so the guild master never has to spell
- * a label that has to survive `compact`. Guild War and Polarity carry no box
- * name here: a box is added on the event board by dragging a team into it, so a
- * chip must not invent one.
+ * `lib/rngw/categories.ts` matches against ("Siege", "Guild League
+ * ลีคหลัก/ลีครอง"). The chips exist so the guild master never has to spell
+ * a label that has to survive `compact`. Siege carries no box name here: a box
+ * is added on the event board by dragging a team into it, so a chip must not
+ * invent one.
  */
 export interface PartyLabelOption {
   /** Doubles as the React key. */
@@ -97,16 +97,10 @@ export interface PartyLabelOption {
 export function partyLabelOptions(): PartyLabelOption[] {
   return [
     {
-      id: "guild-war",
-      event: "guild-war",
+      id: "siege",
+      event: "siege",
       division: "",
-      label: "Guild War",
-    },
-    {
-      id: "polarity",
-      event: "polarity",
-      division: "",
-      label: "Polarity",
+      label: "Siege",
     },
     ...LEAGUE_DIVISIONS.map((division) => ({
       id: `guild-league:${division.id}`,
@@ -120,8 +114,8 @@ export function partyLabelOptions(): PartyLabelOption[] {
 /**
  * The same chips, grouped by the page they belong to, in page order.
  *
- * One flat row of four buttons made "Guild League" look like a fourth event
- * beside "Guild War" and "Polarity", which is exactly the confusion the two
+ * One flat row of three buttons made "Guild League" look like a third event
+ * beside "Siege", which is exactly the confusion the two
  * league chips cause: they are the same event with two divisions. The group
  * heading comes from `EVENT_CATEGORIES` rather than being typed here, so it
  * cannot drift from the page title.
@@ -157,8 +151,8 @@ export function activeLabelIds(placements: PartyPlacement[]): string[] {
 /**
  * Adds one event to the placements, or takes it back out — the chip toggle.
  *
- * Only that event's placement is touched: ticking Guild League on a Guild War
- * party appends it and leaves the war box alone, and unticking it removes only
+ * Only that event's placement is touched: ticking Guild League on a Siege
+ * party appends it and leaves the Siege box alone, and unticking it removes only
  * the league entry. Switching ลีคหลัก to ลีครอง replaces that one placement, and
  * the box resets to "ว่าง" because a box belongs to one division.
  */
@@ -292,8 +286,7 @@ export const RANDOM_FILL_COUNT = TEAM_MAX_MEMBERS - CORE_PARTY_JOBS.length;
  * comes last" would silently move everyone to ลีคหลัก whenever the list changed.
  */
 const RANDOM_PARTY_LABEL_IDS: readonly string[] = [
-  "guild-war",
-  "polarity",
+  "siege",
   "guild-league:lower",
 ];
 

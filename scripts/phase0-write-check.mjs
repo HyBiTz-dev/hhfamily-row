@@ -46,7 +46,7 @@ const stableHash = (rows) =>
 
 /**
  * `parties.content` is a display cache, and every write re-derives it in
- * canonical event order (Guild War → Guild League → Polarity). A row the
+ * canonical event order (Siege → Guild League). A row the
  * migration wrote in another order therefore comes back re-ordered — same
  * segments, same teams. Comparing the sorted segments keeps that from looking
  * like a lost party.
@@ -134,14 +134,14 @@ if (backupFile) {
   );
 }
 
-/* -------------------------------------- A. add a box at Guild War (rows) */
+/* -------------------------------------- A. add a box at Siege (rows) */
 
 const stateA = await getState();
 const boxId = crypto.randomUUID();
 const boxName = "ทดสอบเฟส0";
 await put(stateA.parties, [
   ...stateA.eventRows,
-  { id: boxId, event: "guild-war", division: "", name: boxName, position: 0 },
+  { id: boxId, event: "siege", division: "", name: boxName, position: 0 },
 ]);
 
 {
@@ -157,14 +157,13 @@ await put(stateA.parties, [
 const stateB = await getState();
 const target = stateB.parties.find(
   (party) =>
-    party.placements.length >= 3 &&
-    party.placements.some((p) => p.event === "guild-war") &&
-    party.placements.some((p) => p.event === "guild-league") &&
-    party.placements.some((p) => p.event === "polarity")
+    party.placements.length >= 2 &&
+    party.placements.some((p) => p.event === "siege") &&
+    party.placements.some((p) => p.event === "guild-league")
 );
 if (!target) throw new Error("no shared team found to move");
 const otherPlacementsBefore = target.placements
-  .filter((p) => p.event !== "guild-war")
+  .filter((p) => p.event !== "siege")
   .map((p) => `${p.event}:${p.division}:${p.rowId ?? "-"}`)
   .sort();
 
@@ -174,7 +173,7 @@ await put(
       ? {
           ...party,
           placements: party.placements.map((p) =>
-            p.event === "guild-war" ? { ...p, rowId: boxId } : p
+            p.event === "siege" ? { ...p, rowId: boxId } : p
           ),
           updatedAt: new Date().toISOString(),
         }
@@ -184,13 +183,13 @@ await put(
 
 {
   const placed = await q(
-    "SELECT row_id FROM party_placements WHERE party_id = ? AND event = 'guild-war'",
+    "SELECT row_id FROM party_placements WHERE party_id = ? AND event = 'siege'",
     [target.id]
   );
   const content = await q("SELECT content FROM parties WHERE id = ?", [target.id]);
   const otherPlacementsAfter = (
     await q(
-      "SELECT event, division, COALESCE(row_id,'-') AS row_id FROM party_placements WHERE party_id = ? AND event <> 'guild-war'",
+      "SELECT event, division, COALESCE(row_id,'-') AS row_id FROM party_placements WHERE party_id = ? AND event <> 'siege'",
       [target.id]
     )
   )
@@ -227,7 +226,7 @@ await put(
   check("C box renamed → no party added or lost", after.parties.length === baseline.parties.length);
   check("C box renamed → no placement added or lost", after.placements.length === baseline.placements.length);
   check("C box renamed → placement still points at the box", (
-    await q("SELECT row_id FROM party_placements WHERE party_id = ? AND event = 'guild-war'", [target.id])
+    await q("SELECT row_id FROM party_placements WHERE party_id = ? AND event = 'siege'", [target.id])
   )[0]?.row_id === boxId);
   check("C box renamed → content follows the new name", content[0]?.content?.includes(boxName2));
 }
@@ -256,7 +255,7 @@ await put(
 
 {
   const otherPlacements = await q(
-    "SELECT COUNT(*) AS n FROM party_placements WHERE party_id = ? AND event <> 'guild-war'",
+    "SELECT COUNT(*) AS n FROM party_placements WHERE party_id = ? AND event <> 'siege'",
     [target.id]
   );
   const nameNow = await q("SELECT name FROM parties WHERE id = ?", [target.id]);
@@ -281,7 +280,7 @@ await put(
 {
   const after = await snap();
   const placed = await q(
-    "SELECT row_id FROM party_placements WHERE party_id = ? AND event = 'guild-war'",
+    "SELECT row_id FROM party_placements WHERE party_id = ? AND event = 'siege'",
     [target.id]
   );
   check("E box deleted → row gone from event_rows", !(await q("SELECT id FROM event_rows WHERE id = ?", [boxId])).length);
@@ -299,8 +298,8 @@ await put(
   try {
     await client.batch(
       [
-        { sql: "INSERT INTO event_rows (id, event, division, name, position) VALUES (?,?,?,?,?)", args: [dupId, "guild-war", "", "ชั่วคราว", 0] },
-        { sql: "INSERT INTO event_rows (id, event, division, name, position) VALUES (?,?,?,?,?)", args: [dupId, "guild-war", "", "ซ้ำ", 0] },
+        { sql: "INSERT INTO event_rows (id, event, division, name, position) VALUES (?,?,?,?,?)", args: [dupId, "siege", "", "ชั่วคราว", 0] },
+        { sql: "INSERT INTO event_rows (id, event, division, name, position) VALUES (?,?,?,?,?)", args: [dupId, "siege", "", "ซ้ำ", 0] },
       ],
       "write"
     );

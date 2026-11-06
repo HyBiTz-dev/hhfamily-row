@@ -121,7 +121,7 @@ for (const cookie of cookies) {
 }
 
 const loaded = waitEvent("Page.loadEventFired");
-await send("Page.navigate", { url: `${BASE}/guild-war` });
+await send("Page.navigate", { url: `${BASE}/siege` });
 await loaded;
 
 async function evaluate(expression) {
@@ -307,7 +307,7 @@ async function touchDragCards(fromName, toName) {
 
 async function firstPairInBox() {
   const rows = await q(
-    "SELECT party_id, row_id, position FROM party_placements WHERE event = 'guild-war' ORDER BY position"
+    "SELECT party_id, row_id, position FROM party_placements WHERE event = 'siege' ORDER BY position"
   );
   const byRow = new Map();
   for (const row of rows) {
@@ -344,7 +344,7 @@ async function firstPairInBox() {
     if (rects) await mouseDrag(rects[0], rects[1]);
 
     const after = await q(
-      "SELECT party_id, position FROM party_placements WHERE event = 'guild-war' AND row_id = ? ORDER BY position",
+      "SELECT party_id, position FROM party_placements WHERE event = 'siege' AND row_id = ? ORDER BY position",
       [rowId]
     );
     check(
@@ -359,7 +359,7 @@ async function firstPairInBox() {
 
 {
   const before = await q(
-    "SELECT id, name, position FROM event_rows WHERE event = 'guild-war' ORDER BY position"
+    "SELECT id, name, position FROM event_rows WHERE event = 'siege' ORDER BY position"
   );
   if (before.length >= 2) {
     const fromLabel = before[0].name;
@@ -369,7 +369,7 @@ async function firstPairInBox() {
     if (rects) await mouseDrag(rects[0], rects[1]);
 
     const after = await q(
-      "SELECT id, name, position FROM event_rows WHERE event = 'guild-war' ORDER BY position"
+      "SELECT id, name, position FROM event_rows WHERE event = 'siege' ORDER BY position"
     );
     check(
       "row drag changed the box order",
@@ -401,7 +401,7 @@ async function firstPairInBox() {
     check("touch drag started and hovered the target card", Boolean(live?.includes("team-card:")));
 
     const after = await q(
-      "SELECT party_id, position FROM party_placements WHERE event = 'guild-war' AND row_id = ? ORDER BY position",
+      "SELECT party_id, position FROM party_placements WHERE event = 'siege' AND row_id = ? ORDER BY position",
       [rowId]
     );
     check(

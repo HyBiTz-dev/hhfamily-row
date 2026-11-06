@@ -17,7 +17,7 @@ import type { EventRow, Party, PartyPlacement } from "../lib/rngw/types";
 
 function placed(overrides: Partial<PartyPlacement> = {}): PartyPlacement {
   return {
-    event: "guild-war",
+    event: "siege",
     division: "",
     rowId: null,
     position: 0,
@@ -39,7 +39,7 @@ function party(overrides: Partial<Party> = {}): Party {
 function row(overrides: Partial<EventRow> = {}): EventRow {
   return {
     id: "r1",
-    event: "guild-war",
+    event: "siege",
     division: "",
     name: "กล่อง",
     position: 0,
@@ -51,7 +51,7 @@ function row(overrides: Partial<EventRow> = {}): EventRow {
 
 describe("derivePartyContent", () => {
   const rows = [
-    row({ id: "war", event: "guild-war", division: "", name: "ทีมสเกา", position: 1 }),
+    row({ id: "war", event: "siege", division: "", name: "ทีมสเกา", position: 1 }),
     row({
       id: "upper",
       event: "guild-league",
@@ -59,21 +59,19 @@ describe("derivePartyContent", () => {
       name: "เลนบน",
       position: 0,
     }),
-    row({ id: "polarity", event: "polarity", division: "", name: "โพล", position: 0 }),
   ];
 
   test("orders events canonically, not in placement order", () => {
     const content = derivePartyContent(
       party({
         placements: [
-          placed({ event: "polarity", rowId: "polarity", position: 0 }),
           placed({
             event: "guild-league",
             division: "upper",
             rowId: "upper",
             position: 0,
           }),
-          placed({ event: "guild-war", rowId: "war", position: 0 }),
+          placed({ event: "siege", rowId: "war", position: 0 }),
         ],
       }),
       rows
@@ -81,7 +79,7 @@ describe("derivePartyContent", () => {
 
     assert.equal(
       content,
-      "Guild War ทีมสเกา + Guild League ลีคหลัก เลนบน + Polarity โพล"
+      "Siege ทีมสเกา + Guild League ลีคหลัก เลนบน"
     );
   });
 
@@ -91,7 +89,7 @@ describe("derivePartyContent", () => {
       rows
     );
 
-    assert.equal(content, "Guild War");
+    assert.equal(content, "Siege");
   });
 
   test("keeps the division label when a league team has no box", () => {
@@ -134,12 +132,12 @@ describe("derivePartyContent", () => {
         party({
           placements: [
             placed({ event: "boss" as EventCategoryId }),
-            placed({ event: "polarity", rowId: null }),
+            placed({ event: "guild-league", division: "upper", rowId: "upper" }),
           ],
         }),
         rows
       ),
-      "Polarity"
+      "Guild League ลีคหลัก เลนบน"
     );
     assert.equal(derivePartyContent(party({ placements: [] }), rows), "");
   });
@@ -154,7 +152,7 @@ describe("sortTeamsForScope", () => {
     const unplaced = party({ id: "unplaced", placements: [] });
 
     assert.deepEqual(
-      sortTeamsForScope([late, unplaced, early], "guild-war").map(
+      sortTeamsForScope([late, unplaced, early], "siege").map(
         (entry) => entry.id
       ),
       ["early", "late", "unplaced"]
@@ -167,7 +165,7 @@ describe("sortTeamsForScope", () => {
     const teams = [first, second];
 
     assert.deepEqual(
-      sortTeamsForScope(teams, "guild-war").map((entry) => entry.id),
+      sortTeamsForScope(teams, "siege").map((entry) => entry.id),
       ["first", "second"]
     );
     assert.deepEqual(teams, [first, second]);
@@ -176,15 +174,15 @@ describe("sortTeamsForScope", () => {
 
 describe("eventRowsFor / rowsForScope", () => {
   const rows = [
-    row({ id: "war-b", event: "guild-war", name: "B", position: 1 }),
+    row({ id: "war-b", event: "siege", name: "B", position: 1 }),
     row({ id: "upper", event: "guild-league", division: "upper", name: "บน" }),
-    row({ id: "war-a", event: "guild-war", name: "A", position: 0 }),
+    row({ id: "war-a", event: "siege", name: "A", position: 0 }),
     row({ id: "lower", event: "guild-league", division: "lower", name: "ล่าง" }),
   ];
 
   test("filters one scope and sorts by position", () => {
     assert.deepEqual(
-      eventRowsFor(rows, "guild-war", null).map((entry) => entry.id),
+      eventRowsFor(rows, "siege", null).map((entry) => entry.id),
       ["war-a", "war-b"]
     );
     assert.deepEqual(
@@ -194,7 +192,7 @@ describe("eventRowsFor / rowsForScope", () => {
   });
 
   test("ends every scope with the virtual parking row", () => {
-    const lanes = rowsForScope(rows, "guild-war", null);
+    const lanes = rowsForScope(rows, "siege", null);
 
     assert.deepEqual(
       lanes.map((lane) => lane.id),
@@ -212,12 +210,12 @@ describe("setPartyPlacement / withoutPartyPlacement", () => {
     const current = party({
       placements: [
         placed({ rowId: "old", position: 1 }),
-        placed({ event: "polarity", rowId: "polarity", position: 4 }),
+        placed({ event: "guild-league", division: "upper", rowId: "upper", position: 4 }),
       ],
     });
     const next = setPartyPlacement(
       current,
-      "guild-war",
+      "siege",
       "",
       "new-box"
     );
@@ -225,7 +223,7 @@ describe("setPartyPlacement / withoutPartyPlacement", () => {
     assert.deepEqual(next.placements, [
       current.placements[1],
       {
-        event: "guild-war",
+        event: "siege",
         division: "",
         rowId: "new-box",
         position: APPEND_POSITION,
@@ -240,7 +238,7 @@ describe("setPartyPlacement / withoutPartyPlacement", () => {
 
     assert.deepEqual(
       next.placements.map((placement) => placement.event),
-      ["guild-war", "guild-league"]
+      ["siege", "guild-league"]
     );
     assert.equal(next.placements[1].division, "upper");
   });
@@ -248,7 +246,7 @@ describe("setPartyPlacement / withoutPartyPlacement", () => {
   test("removes one event and leaves the rest alone", () => {
     const war = placed({ rowId: "war" });
     const league = placed({ event: "guild-league", division: "upper" });
-    const next = withoutPartyPlacement(party({ placements: [war, league] }), "guild-war");
+    const next = withoutPartyPlacement(party({ placements: [war, league] }), "siege");
 
     assert.deepEqual(next.placements, [league]);
   });

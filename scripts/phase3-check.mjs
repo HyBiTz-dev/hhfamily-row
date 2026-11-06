@@ -177,7 +177,7 @@ const put = (payload) =>
   const row = before.eventRows[0];
   const scope = row
     ? { event: row.event, division: row.division }
-    : { event: "guild-war", division: "" };
+    : { event: "siege", division: "" };
   const first = {
     id: crypto.randomUUID(),
     event: scope.event,

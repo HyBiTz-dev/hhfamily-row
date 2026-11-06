@@ -6,7 +6,7 @@
  */
 
 /** The boards a party can play on. */
-export type EventCategoryId = "guild-war" | "guild-league" | "polarity";
+export type EventCategoryId = "siege" | "guild-league";
 
 /** Whether a member is playing today. */
 export type AttendanceStatus = "present" | "leave" | "unknown";
@@ -58,7 +58,7 @@ export interface AttendanceRow {
  * One box/team-large on a board.
  *
  * Rows are named by the guild master, for every event. League rows used to be
- * fixed game lanes; they are now the same first-class containers as Guild War
+ * fixed game lanes; they are now the same first-class containers as Siege
  * boxes, which is why a row can stay empty and be renamed or reordered.
  */
 export interface EventRow {
@@ -75,7 +75,7 @@ export interface EventRow {
  *
  * A party has one placement per event it plays, so its event set is the set of
  * these rows. The roster is not here: it lives on the party, which is why
- * editing a member on Guild War also changes the same party on Guild League.
+ * editing a member on Siege also changes the same party on Guild League.
  */
 export interface PartyPlacement {
   event: EventCategoryId;
@@ -96,7 +96,7 @@ export interface PartyPlacement {
 export interface Party {
   id: string;
   name: string;
-  /** Derived display label, e.g. "Guild War ทีมสเกา". Read-only. */
+  /** Derived display label, e.g. "Siege ทีมสเกา". Read-only. */
   content?: string;
   /** One entry per event this team plays. */
   placements: PartyPlacement[];
@@ -151,6 +151,16 @@ export const CARRY_PIN_MIN_LENGTH = 4;
 export const CARRY_PIN_MAX_LENGTH = 12;
 
 /**
+ * How many finished entries a room card shows.
+ *
+ * "ลงแล้ว" takes a name off the queue but keeps it as a log so the carrier can
+ * see who they already ran. The log grows forever, so the read returns only the
+ * newest few per room — the page never needs the whole history, and an unbounded
+ * list would make the board slower every week.
+ */
+export const CARRY_DONE_LOG_LIMIT = 10;
+
+/**
  * A "ห้องแบก" — one carrier's queue for one activity.
  *
  * A member may run several rooms, and each room has its own management PIN and
@@ -192,6 +202,22 @@ export interface CarryQueueLocation {
   carrierName: string;
 }
 
+/**
+ * A name the carrier already ran.
+ *
+ * Pressing "ลงแล้ว" deletes the `carry_signups` row (the queue is only people
+ * still waiting) and writes this record instead. It is a log, not a state: the
+ * name is free to join a queue again, and nothing about the queue counts these
+ * rows. `signedAt` is kept so the log shows how long the person waited.
+ */
+export interface CarryDone {
+  roomId: number;
+  name: string;
+  note?: string;
+  signedAt: number;
+  doneAt: number;
+}
+
 /** Body of `GET /api/carry-signups`: every room, every queue, and the roster.
  *
  * `authorizedRoomIds` is computed from the carrier session cookies on the
@@ -203,6 +229,11 @@ export interface CarryBoardResponse {
   rooms: CarryRoom[];
   signups: CarrySignup[];
   members: Member[];
+  /**
+   * The newest few finished names per room, for the carrier's log. Read-only:
+   * only the room card's own "ลงแล้ว" section uses it.
+   */
+  done: CarryDone[];
   authorizedRoomIds: number[];
   /**
    * True only for the guild-admin session, not for a carrier who happens to

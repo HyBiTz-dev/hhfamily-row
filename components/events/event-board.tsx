@@ -56,7 +56,7 @@ import type {
 } from "@/lib/rngw/types"
 
 /**
- * One screen per guild event, shared by /guild-war and /guild-league.
+ * One screen per guild event, shared by /siege and /guild-league.
  *
  * A party plays an event through its placements, and the boxes it can be
  * dropped into are `event_rows` for that scope. The event pages are therefore
@@ -65,7 +65,7 @@ import type {
  * Guild League carries a second level: the game fixes how many players each
  * division holds (ลีคหลัก 60, ลีครอง 90), so a division's capacity is a limit we
  * have to respect rather than a number we compute. Events without divisions
- * (Guild War) render the same components with `division` left undefined.
+ * (Siege) render the same components with `division` left undefined.
  */
 export function EventBoard({ category }: { category: EventCategoryId }) {
   const meta = getEventCategory(category)

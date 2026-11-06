@@ -550,17 +550,17 @@ function LaneRow({
   unparked: number
   query?: string
   onDelete?: (lane: LeagueLane) => void
-  /** Renames this box. Guild War only — a league lane is the game's. */
+  /** Renames this box. Siege only — a league lane is the game's. */
   onRename?: (lane: LeagueLane, nextName: string) => void | Promise<void>
-  /** Renames a team inside this row and may relabel it. Guild War only. */
+  /** Renames a team inside this row and may relabel it. Siege only. */
   onRenameTeam?: (
     teamId: string,
     nextName: string,
     nextPlacements: PartyPlacement[]
   ) => void | Promise<void>
-  /** Adds a member to a team in this row. Guild War only. */
+  /** Adds a member to a team in this row. Siege only. */
   onAddMember?: (teamId: string, name: string) => void | Promise<void>
-  /** Removes a member from a team in this row. Guild War only. */
+  /** Removes a member from a team in this row. Siege only. */
   onRemoveMember?: (teamId: string, name: string) => void | Promise<void>
   /** Keyboard (no-drag) equivalent of the card reorder. */
   onMoveTeamInRow?: (teamId: string, delta: -1 | 1) => void

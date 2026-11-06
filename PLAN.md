@@ -21,7 +21,7 @@ optimistic lock ด้วย `app_meta.parties_version` · ตรวจด้ว
 | ทีม / ปาร์ตี้ | 1 แถวใน `parties` |
 | กล่อง / แถว | 1 แถวใน `event_rows` (ทุกอีเวนต์ รวมลีก) |
 | placement | 1 แถวใน `party_placements` = ทีมลงอีเวนต์ไหน อยู่กล่องไหน |
-| scope | `event` + `division` เช่น `guild-war:''`, `guild-league:upper` |
+| scope | `event` + `division` เช่น `siege:''`, `guild-league:upper` |
 
 ---
 
@@ -31,7 +31,7 @@ optimistic lock ด้วย `app_meta.parties_version` · ตรวจด้ว
   - รันด้วย `node scripts/phase0-write-check.mjs backups/turso-parties-backup-*.json`
     (เปิด `npm run dev` ทิ้งไว้ก่อน) เป็นรอบเดียวที่เดินครบทุกข้อแล้ว **ยิงผ่าน HTTP API จริง**
     → route handler → `parseParties` → `saveParties` → `batch` บน Turso HTTP client
-  - เพิ่มกล่อง 1 กล่องที่ `/guild-war` → ยืนยันว่า `event_rows` มีแถวใหม่
+  - เพิ่มกล่อง 1 กล่องที่ `/siege` → ยืนยันว่า `event_rows` มีแถวใหม่
   - ลากทีมเข้าถล่อง → ยืนยัน `party_placements.row_id` เปลี่ยน และ `parties.content` ถูก derive ใหม่
   - เปลี่ยนชื่อกล่อง → ยืนยันว่าไม่มีทีมถูกเขียนซ้ำ/หาย
   - เปลี่ยนชื่อทีม + แก้สมาชิก → ยืนยันว่าอีเวนต์อื่นของทีมเดียวกันยังอยู่
@@ -40,7 +40,7 @@ optimistic lock ด้วย `app_meta.parties_version` · ตรวจด้ว
   - **พิสูจน์แล้วว่า `batch` บน HTTP client เป็น transaction เดียวจริง**: batch ที่มี
     id ซ้ำล้มเหลวทั้งก้อน ไม่มีแถวค้าง
   - ข้อสังเกต: การเขียนทุกครั้งจะ rewrite `parties.content` ใหม่ตามลำดับอีเวนต์มาตรฐาน
-    (Guild War → Guild League → Polarity) — เป็นแค่ display cache ไม่มีข้อมูลหาย
+    (Siege → Guild League) — เป็นแค่ display cache ไม่มีข้อมูลหาย
     (สคริปต์เทียบแบบเรียง segment ก่อนเทียบ hash)
 - [x] **0.2 สำรองข้อมูลก่อนเขียนรอบแรก**
   - `node scripts/turso-backup.mjs [label]` → `backups/turso-parties-backup-<ts>[-label].json`

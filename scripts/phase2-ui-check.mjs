@@ -54,7 +54,7 @@ async function clickPoint(point) {
 const center = (selectorCode) => evaluate(`(() => { const el = ${selectorCode}; if (!el) return null; el.scrollIntoView({ block: "center" }); const b = el.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
 
 /* ------------------------------------------------- member order select */
-await navigate(`${BASE}/guild-war`);
+await navigate(`${BASE}/siege`);
 check("board ready", await waitFor(`Boolean(document.body.innerText.includes("ลำดับสมาชิกในทีม"))`));
 const trigger = await center(`document.querySelector('[role="combobox"]')`);
 check("member-order select found", Boolean(trigger));
@@ -70,7 +70,7 @@ check("select kept the slot mode", selectValue === "ตามลำดับท�
 
 // A card should now list its members in party_members.slot order. Find the
 // team with the most members and compare the DOM rows against the DB.
-const most = (await q("SELECT p.id, p.name FROM parties p JOIN party_members m ON m.party_id = p.id JOIN party_placements pl ON pl.party_id = p.id WHERE pl.event = 'guild-war' GROUP BY p.id ORDER BY COUNT(*) DESC LIMIT 1"))[0];
+const most = (await q("SELECT p.id, p.name FROM parties p JOIN party_members m ON m.party_id = p.id JOIN party_placements pl ON pl.party_id = p.id WHERE pl.event = 'siege' GROUP BY p.id ORDER BY COUNT(*) DESC LIMIT 1"))[0];
 const slotRows = await q("SELECT member_name FROM party_members WHERE party_id = ? ORDER BY slot", [most.id]);
 const domRows = await evaluate(`(() => {
   const title = [...document.querySelectorAll('[data-slot=card-title]')].find((n) => n.textContent.trim() === ${JSON.stringify(most.name)});

@@ -372,7 +372,7 @@ export function PartyBuilder({
    *
    * `fromPartyId` is the card a drag started on. A drag is always a *move*, so
    * the name is taken off that card whatever event it labels — the world can
-   * hold a player on a Guild War team and a league team at once, but yanking
+   * hold a player on a Siege team and a league team at once, but yanking
    * their card onto another and leaving them behind in both is not what the
    * gesture says. With no source (the add box) the
    * event board's rule applies instead: only a party labelling the *same* event

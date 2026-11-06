@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Trash2, TriangleAlert } from "lucide-react"
+import { Eraser, Trash2, TriangleAlert } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -173,6 +173,55 @@ export function AbsenceWarnings({
   }
 
   /**
+   * Clears one member's check-in history without removing them.
+   *
+   * The count comes from the ledger itself, so the confirm names the exact
+   * number of rows before anything is deleted. The member stays on the roster
+   * and in every team — that is the difference between this button and the bin
+   * beside it, and the only reason both can exist on the same row.
+   */
+  async function clearHistory(name: string) {
+    if (busy) return
+
+    const history = historyCount.get(name) ?? 0
+    const yes = await confirm({
+      title: `ลบประวัติเช็คชื่อของ ${name}?`,
+      description: [
+        history > 0 ? `ลบประวัติ ${history} แถว` : "คนนี้ไม่มีประวัติให้ลบ",
+        "ตัวเลข “ไม่มา ไม่ลา” จะรีเซ็ตและเริ่มนับใหม่",
+        "ชื่อยังอยู่ในกิลด์และทีมเดิม",
+        "ถาวร — คืนไม่ได้",
+      ].join(" · "),
+      confirmLabel: "ลบประวัติ",
+      tone: "danger",
+    })
+    if (!yes) return
+
+    setBusy(true)
+    try {
+      const res = await fetch("/api/admin/attendance/purge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      })
+      const body = await res.json()
+      if (!res.ok) throw new Error(body.error ?? "ลบประวัติไม่สำเร็จ")
+
+      toast.success(`ลบประวัติของ ${name} แล้ว`, {
+        description: [
+          `ลบ ${body.deleted ?? history} แถว`,
+          "ตัวเลขขาดเริ่มนับใหม่",
+        ].join(" · "),
+      })
+      onSaved()
+    } catch (cause) {
+      toast.error((cause as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
    * The same delete button for both layouts below — the mobile list and the
    * table — so there is one button and one `remove` call, not two that could
    * drift apart.
@@ -188,6 +237,30 @@ export function AbsenceWarnings({
         onClick={() => remove(name)}
       >
         <Trash2 />
+      </Button>
+    )
+  }
+
+  /**
+   * The history eraser, next to the bin but a smaller decision.
+   *
+   * It is offered to everyone in the list, including members still below the
+   * alert line: a history can be wrong ("my row says I was away but I was
+   * there") and waiting for a third miss before it can be fixed would make the
+   * warning look more certain than the data is.
+   */
+  function historyButton(name: string) {
+    return (
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="text-muted-foreground hover:text-destructive size-9 shrink-0 touch-manipulation sm:size-7"
+        aria-label={`ลบประวัติเช็คชื่อของ ${name}`}
+        title="ลบประวัติเช็คชื่อ — รีเซ็ตการนับ แต่ยังอยู่ในกิลด์"
+        disabled={busy}
+        onClick={() => clearHistory(name)}
+      >
+        <Eraser />
       </Button>
     )
   }
@@ -213,7 +286,8 @@ export function AbsenceWarnings({
     <p className="leading-relaxed">
       นับเฉพาะวันเล่นกิลด์ ({guildDayLabel()}) ที่ผ่านมาแล้วและมีคนตอบจริง
       และเริ่มนับตั้งแต่วันที่สมาชิกตอบครั้งแรก · ระบบไม่ทำอะไรกับชื่อใดเอง —
-      ขาดครบ {ABSENCE_ALERT_AFTER} ครั้งจะมีปุ่มถังขยะให้กดลบออกจากกิลด์
+      ปุ่มยางลบที่แถวคือล้างประวัติเช็คชื่อของคนนั้น (รีเซ็ตการนับ แต่ยังอยู่ในกิลด์)
+      · ขาดครบ {ABSENCE_ALERT_AFTER} ครั้งจะมีปุ่มถังขยะให้กดลบออกจากกิลด์
       (ลบถาวรพร้อมประวัติ กดแล้วถามยืนยันอีกครั้ง)
     </p>
   )
@@ -243,7 +317,7 @@ export function AbsenceWarnings({
             <p className="min-w-0 flex-1 text-sm">
               ขาดครบ {ABSENCE_ALERT_AFTER} ครั้ง {overLine.length} คน:{" "}
               <span className="font-medium">{overLine.map(([name]) => name).join(", ")}</span>{" "}
-              — กดถังขยะที่แถวถ้าจะเอาออกจากกิลด์
+              — กดถังขยะที่แถวถ้าจะเอาออกจากกิลด์ หรือกดยางลบเพื่อล้างประวัติแล้วเริ่มนับใหม่
             </p>
           </div>
         )}
@@ -252,10 +326,10 @@ export function AbsenceWarnings({
           Two layouts, one list of people.
 
           A four-column table cannot fit a 320px screen once the miss-dates
-          string and the delete button are in it — and the button sits in the
+          string and the action buttons are in it — and the buttons sit in the
           last column, so the thing this tab exists for ends up off-screen
           behind a horizontal scroll nobody thinks to try. On phones it is
-          therefore a plain list: name and dates stacked, button always at the
+          therefore a plain list: name and dates stacked, buttons always at the
           right edge where the thumb already is. The table keeps the screen
           from `sm` up, where the columns have room and the sticky header
           earns its keep.
@@ -294,7 +368,10 @@ export function AbsenceWarnings({
                       {info.dates.join(", ")}
                     </p>
                   </div>
-                  {over && removeButton(name)}
+                  <div className="flex shrink-0 items-center gap-1">
+                    {historyButton(name)}
+                    {over && removeButton(name)}
+                  </div>
                 </li>
               )
             })}
@@ -317,15 +394,15 @@ export function AbsenceWarnings({
                   <TableHead className="sticky top-0 z-10 bg-card text-right">ขาด</TableHead>
                   <TableHead className="sticky top-0 z-10 bg-card">วันที่ขาด</TableHead>
                   {/*
-                    The delete column exists only when there is somebody it
-                    applies to. An empty header cell on every quiet member would
-                    read as "you may delete this one too".
+                    The action column is always here because the history eraser
+                    applies to every warned member. Only the bin inside it is
+                    gated by `pastAlertLine`; a row below the line still shows
+                    the eraser, never an empty gap that reads as "this one can
+                    be removed too".
                   */}
-                  {overLine.length > 0 && (
-                    <TableHead className="sticky top-0 z-10 w-12 bg-card">
-                      <span className="sr-only">ลบออกจากกิลด์</span>
-                    </TableHead>
-                  )}
+                  <TableHead className="sticky top-0 z-10 w-20 bg-card text-right">
+                    <span className="sr-only">จัดการ</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -356,9 +433,12 @@ export function AbsenceWarnings({
                       <TableCell className="text-muted-foreground text-xs tabular-nums">
                         {info.dates.join(", ")}
                       </TableCell>
-                      {overLine.length > 0 && (
-                        <TableCell className="text-right">{over && removeButton(name)}</TableCell>
-                      )}
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-1">
+                          {historyButton(name)}
+                          {over && removeButton(name)}
+                        </div>
+                      </TableCell>
                     </TableRow>
                   )
                 })}
